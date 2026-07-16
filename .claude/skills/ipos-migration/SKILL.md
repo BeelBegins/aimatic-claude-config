@@ -30,6 +30,22 @@ outside the one repo that owns it.
 
 **Items:**
 - `ItemCode` and `RefCode` are the first two barcodes.
+- **`CurCost` is tax-inclusive — always reverse-calculate before using it as a Stock Entry
+  valuation rate, never use it raw.** Bug fixed 2026-07-16: both reference scripts used to pass
+  `CurCost` straight through as `basic_rate`/`valuation_rate`, inflating imported stock's cost
+  basis by the embedded tax — this flowed into COGS once that stock sold, with no matching
+  inflation on the (tax-exclusive) Sales side, and was the confirmed root cause of `siezal`
+  reporting COGS higher than Sales. Fix: `sales_tax = CurCost * tax_rate / (100 + tax_rate)`,
+  `rate = CurCost - sales_tax` — the *exact same formula* `fbr_pos/tax_calculator.py`'s
+  `calculate_fbr_item` already uses for the sales-side reverse calculation, using the item's own
+  `custom_fbr_tax_category` rate (set during `create_item`, before stock rows are captured — the
+  category is already committed by the time the rate is read). Exempt items pass through
+  unchanged. **Known caveat**: a row with a blank/invalid `Fbr_Tax_Category` in the source file
+  resolves `tax_rate` to `0`, so `CurCost` passes through unfixed for that item — check the
+  source file's category fill rate before a new import rather than trusting this blindly. This
+  fix is **not retroactive** — `siezal`'s and `hsm`'s already-imported stock still carries the
+  original tax-inclusive valuation; correcting historical Stock Ledger Entries is a separate,
+  explicit decision.
 - `Pcs` UOM needs `Must be Whole Number = No` if source `Onhand` has decimals — set this
   *before* running stock entries, or `UOMMustBeIntegerError` aborts mid-batch.
 - MRP fallback chain: source `MRP` if nonzero → else `rp × 1.18` if `rp` nonzero → else

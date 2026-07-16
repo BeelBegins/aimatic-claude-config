@@ -66,6 +66,43 @@ individual POS Invoice submit, regardless of its `update_stock` value. They only
 correctly-flagged POS Invoice sitting in an un-closed shift showing no stock movement is
 expected.
 
+## Client-side payment completion (F6) — Electron only, not where gift vouchers apply
+
+The Electron renderer's **F6** key/button ("Pay") opens the Payment dialog
+(`completePaymentAllocation`/`openPayment` in `Posapplication/src/renderer/renderer.ts`), which
+collects one or more split payment rows and, once fully covered, calls `submit_online_sale` with
+`payments: paymentRows.map(...)`. This had a real, since-fixed bug: pre-v2.4.7, pressing F6 to
+confirm payment didn't reliably complete and print the sale (fixed in commit "Bump version to
+2.4.7: F6 payment confirm now completes and prints the sale") — if a payment-completion report
+resurfaces, check this exact flow first, not just the server endpoint.
+
+Current gating, useful context before touching this flow again: `openPayment()` requires a valid
+cashier session, blocks if `shiftClosed` is true (a closed shift blocks both F6 and F9 until a
+new shift starts), and validates the cart's server-side version before allowing payment to begin.
+Once the entered amount fully covers the remaining balance, the dialog deliberately does **not**
+auto-submit — it shows "Payment Ready" and requires one more explicit F6/click, specifically so a
+mistyped last split-payment leg has a beat to be caught before the sale actually submits.
+
+**F6 (Payment) is a different screen from F7 (Benefits)** — don't conflate them. Loyalty points,
+coupon codes, and gift voucher redemption are applied via the separate **Benefits (F7)** dialog,
+*before* a cashier ever opens the Payment (F6) dialog — see the `loyalty-gift-voucher` skill for
+that flow, including a real 2026-07-16 incident where "Gift Voucher" ended up directly selectable
+as an F6 payment mode on production, bypassing F7 entirely — now guarded server-side.
+
+## Native dialog focus loss on Windows — use appConfirm/appAlert, never raw confirm()/alert()
+
+Electron's native `window.confirm()`/`alert()` frequently don't return OS-level foreground focus
+to the main window afterward on Windows (a `BrowserWindow.focus()` call alone often can't reclaim
+it — Windows restricts `SetForegroundWindow` from background processes), which without a fix
+means the cashier has to manually Alt+Tab back in mid-sale. `renderer.ts`'s `appConfirm`/
+`appAlert` wrappers exist specifically to paper over this (call the native dialog, then invoke
+`focusPosWindow()` via IPC) — **every** confirm/alert call site must go through them, never a raw
+`confirm()`/`alert()`; a real incident (2026-07-16) had two call sites (`deleteHeldSaleUi`,
+`resumeHeldSale`) still calling `window.confirm()` directly, silently missing the fix.
+`main.ts`'s `window:focus-pos` IPC handler itself was also strengthened beyond a bare `.focus()`
+— it now restores-if-minimized and briefly toggles `setAlwaysOnTop` first, matching the standard
+Electron/Windows workaround for this exact class of focus-stealing bug.
+
 ## Cross-reference
 
 If POS administrator/Settings login fails with "HTTPS is required for supervisor

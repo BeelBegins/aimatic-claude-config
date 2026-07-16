@@ -70,6 +70,62 @@ Redemption is finalized race-safely (conditional `UPDATE ... WHERE status='Activ
 `terminal_invoice_id` replay in `offline_pos/api.py` — don't move voucher finalization earlier
 in the flow, or a failed/retried submit could burn a voucher with no corresponding sale.
 
+## Client-side redemption (Electron) — applied via Benefits (F7), not Payment (F6)
+
+Confirmed live in `Posapplication/src/renderer/renderer.ts`/`index.html`: a cashier enters or
+scans a gift voucher code in the **Benefits (F7)** dialog (`benefits-gift-voucher-code`,
+alongside loyalty points and coupon code — all three share this one dialog), which sets
+`appliedBenefits.giftVoucherCode`. That value flows into `preview_cart`'s `gift_voucher_code`
+param for the live cart preview, and into `submit_online_sale`'s `salePayload.gift_voucher_code`
+at final submission — this is the same server contract documented above, just showing where the
+client actually collects it. This is a **different dialog from Payment (F6)** — see the
+`offline-pos` skill for that one; benefits are always applied before a cashier opens Payment, not
+during it.
+
+**Hard client-side constraint**: gift voucher redemption requires ERPNext online validation — an
+applied voucher **blocks offline sale** entirely (`"Gift voucher redemption requires ERPNext
+online validation. Remove voucher to sell offline."`). A cashier must remove the voucher to
+complete an offline-queued sale. Any new redemption-adjacent client feature must preserve this —
+don't let a voucher amount get silently estimated/trusted offline.
+
+## Real incident, 2026-07-16: "Gift Voucher" as a selectable payment mode was a live fraud hole
+
+Confirmed on production `siezal`: all 4 real checkout counters (`S1GT Counter 1-4`) had
+**"Gift Voucher" configured directly in their POS Profile payment methods list**, selectable in
+the Electron client's F6 Payment screen like Cash/Credit Card. `offline_pos/api.py`'s
+`_validate_and_set_payments` trusted `allowed_modes` from the POS Profile's own config, and its
+docstring's safety assumption ("the client can't choose/send the Gift Voucher mode") was **only
+true if nothing ever put it in that list** — nothing enforced that. A cashier could pick "Gift
+Voucher" as the mode, type any amount, and submit — no real voucher checked or consumed, GL entry
+lands in the Gift Voucher account instead of Cash. This is a clean till-skimming vector: take real
+cash, mark it paid by a nonexistent voucher.
+
+**Fixed with two layers, keep both — neither alone is sufficient:**
+1. `gift_voucher/events.py:validate_pos_profile_no_manual_gift_voucher_payment` (POS Profile
+   `validate` hook, alongside `validate_pos_profile_cost_center`) — throws if "Gift Voucher" ever
+   appears in a POS Profile's `payments` child table again.
+2. **Defense in depth in `offline_pos/api.py:_validate_and_set_payments`** — explicitly rejects
+   `mode_of_payment == "Gift Voucher"` in client-submitted payment rows, unconditionally, not
+   just by relying on it being absent from `allowed_modes`. This is the one that actually matters
+   if the POS Profile guard is ever bypassed (Desk UI isn't the only way to edit a POS Profile).
+
+If a future report says "a payment mode is producing wrong GL entries" or "till doesn't
+reconcile," check whether a server-only mode of payment (this one, or any future equivalent) has
+ended up in a POS Profile's payment list before assuming it's a calculation bug.
+
+## Client-side: no browsable voucher list — redemption requires the actual code
+
+Also fixed 2026-07-16: the Benefits (F7) dialog used to fetch and list a selected customer's
+gift vouchers as clickable buttons that auto-filled the code field — convenient, but it meant a
+cashier only had to have a customer *selected* (by name/phone, not physically present) to browse
+and redeem their vouchers. `loadCustomerBenefits()`/`renderGiftVoucherList()` in
+`Posapplication/src/renderer/renderer.ts` no longer fetch or display a customer's voucher list at
+all — redemption only works if whoever's at the counter provides the actual code (typed, or
+scanned via a barcode-generated-from-`voucher_code` if the store's existing item scanner is
+reused for this — not yet built, `voucher_code` is currently plain text with no barcode/QR
+representation). Don't reintroduce a "browse this customer's vouchers" convenience feature
+without a real proof-of-possession requirement behind it.
+
 ## Known cross-cutting quirk — don't silently "fix" it here
 
 `fbr_pos/payload_builder.py:get_payment_mode()` picks the FBR-reported `PaymentMode` from

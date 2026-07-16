@@ -1,0 +1,6 @@
+*
+!.gitignore
+!CLAUDE.md
+!.claude/
+!.claude/**
+.claude/scheduled_tasks.lock

@@ -402,6 +402,58 @@ correctness.
   widget list, and doesn't update on its own; confirmed live (a widget rendered correctly in the
   just-opened dashboard while the sidebar still showed its stale pre-add count) before being fixed.
 
+**Suggested Questions redesign (2026-07-18)** — `build_suggested_questions()` now renders a
+**collapsed-by-default** panel instead of always-visible pill buttons: a single compact
+`.ai-assistant-suggested-header` row (lightbulb icon, "Suggested Questions" label, a `(N)` count
+badge, a chevron) toggles a hidden `.ai-assistant-suggested-list` open/closed
+(`_toggle_suggested`/`_collapse_suggested`). Clicking a question still calls `send_message(q)`
+exactly as before, then immediately re-collapses the panel so it doesn't keep eating vertical
+space above the chat after a question is picked. Fixes a real complaint: System Manager's role
+has 19 suggested questions, which as a flat always-visible flex-wrap row pushed the chat window
+down several lines; collapsed height is ~33px vs. ~595px expanded (measured live on szl).
+
+## Executive Overview dashboard (built 2026-07-18)
+
+A 10-widget `AI Dashboard` named **"Executive Overview"**, owned by `Administrator`, exists on
+all three sites (szl `6nf79090o4`, siezal `90ob2r8cmr`, hsm `bhlmvhta8p`) — built by scripting the
+*real* `ask()`/`save_report()`/`create_dashboard()`/`add_widget_to_dashboard()` API functions
+directly (via `bench --site <site> console`, `frappe.set_user("Administrator")` first) rather than
+hand-writing fake widget data, so every widget holds genuine live KPIs/charts/tables exactly as if
+a user had asked and saved each question through the UI. The 10 questions cover: total sales
+overview, gross margin, branch comparison, purchase spend, vendor margin ranking, outstanding
+payables, outstanding receivables, top selling items, dead stock risk, and returns overview — a
+deliberate CFO/CEO-level spread (revenue, margin, spend, vendor risk, cash position, inventory
+risk, loss/returns), not an arbitrary pick of whichever tools existed.
+
+**Why Administrator, not a per-user "CEO" account**: `AI Dashboard`/`AI Saved Report` are strictly
+single-owner (`_check_dashboard_ownership`/`_check_saved_report_ownership` — see above,
+`list_dashboards`/`get_dashboard` filter by `frappe.session.user` with no sharing mechanism at
+all, not even for System Manager). Administrator was the practical, already-used account for this
+work (same one used for every live Playwright verification in this module); a business owner
+wanting their own copy needs `add_widget_to_dashboard` run again under their own login — there is
+no dashboard-sharing feature yet.
+
+**Gotcha — `bench console` executes piped input line-by-line as separate REPL cells, not as one
+script**: piping a multi-line Python file directly into `bench --site <site> console` (`bench
+--site szl console < script.py`) breaks any `for`/`try` block spanning multiple logical lines —
+IPython's line-buffered paste handling split a `for` loop's body across cells, throwing
+`SyntaxError: 'continue' not properly in loop` and silently skipping the rest of that iteration.
+Fixed by feeding a **single line** that reads and `exec()`s the whole file instead:
+`echo "exec(open('/path/to/script.py').read())" | bench --site <site> console` — this runs the
+entire script as one atomic block, the same fix pattern documented for reload-and-commit scripts
+in the `print-format-packaging` skill's "`bench console` scripts that reload/mutate must commit
+explicitly" note (same root cause: piped console input is not a substitute for a real script
+runner).
+
+**Gotcha — the shared OpenRouter free-tier quota (see "Nemotron client and model config" above)
+means building this on multiple sites back-to-back will transiently fail a question or two** with
+either `ResourceExhausted: Worker local total request limit reached` or an HTTP 429
+`Rate limit exceeded: free-models-per-min` — not a code bug, a concurrency/rate ceiling shared
+across all three sites' one API key. Confirmed live: building the same 10-widget dashboard on
+siezal and hsm each hit exactly 2 of these transient failures; a short (15-20s) wait then retrying
+just the failed question(s) — re-running `ask()`, `save_report()`, `add_widget_to_dashboard()` for
+those alone against the same already-created dashboard — succeeded every time on the next attempt.
+
 ## Working safely
 
 Update this skill (not `CLAUDE.md` directly — see that file's own "Keeping this file current"

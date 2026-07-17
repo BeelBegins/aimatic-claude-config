@@ -203,6 +203,35 @@ dispatches `tool_calls` via the merged `TOOL_DISPATCH`, accumulates each *succes
 `_log_turn`, and returns `StructuredResponse.to_dict()`. Every tool is read-only — the assistant
 can never create, submit, or modify a document.
 
+**Real bug found and fixed 2026-07-18 — malformed tool-call text shipped as the answer**: when a
+turn's `tool_calls` is empty, the loop always treated `assistant_message["content"]` as the final
+natural-language reply. The free-tier model occasionally malforms a tool call — instead of using
+the real `tool_calls` protocol it writes what should have been the call's *arguments* as plain
+`content` text, e.g. literally `{"company": "Test Company", "days": 30}` (sometimes duplicated on
+separate lines) — and since that message has no `tool_calls`, the old code shipped that raw JSON
+straight to the user as if it were the answer. Reproduced live and confirmed in the persisted `AI
+Assistant Message` log with the phrasing "what items should I purchase tomorrow" / "what should I
+order tomorrow" (intermittent, not every attempt — same question succeeded on retry). Fixed by
+`_looks_like_raw_tool_json(content)`: every non-blank line must itself parse as a bare JSON object
+with no surrounding prose (a real answer never satisfies that, even one containing a markdown
+table). When it fires, the loop does **not** return — it appends a corrective `user`-role message
+telling the model to actually call the tool or answer in plain language, and `continue`s within the
+existing `_MAX_TOOL_ITERATIONS` budget (a correction consumes one iteration slot, same as a real
+tool call would). Also logs a `frappe.log_error` titled "AI Assistant: malformed tool-call text
+corrected" with the question and raw content, for visibility into how often this fires in
+practice. Verified via a mocked `get_chat_completion` sequence (malformed-JSON turn → real tool
+call → real final answer) proving the loop recovers, since the underlying LLM misbehavior itself
+is nondeterministic and can't be reliably forced live.
+
+For "what should I purchase/order" style questions specifically: there is no dedicated
+reorder/replenishment tool — the assistant correctly reframes these into a call to
+`get_inventory_vs_sales` (stock vs. 30-day sales velocity → days-of-stock) and the model itself
+does the "which of these are actually low, not overstocked" reasoning in its final text answer.
+This works well in practice (verified live: correctly picked out one critically-low item from
+three flagged rows, correctly explained the other two were overstocked not understocked) but is
+LLM reasoning over a general-purpose tool, not a purpose-built reorder-point calculation — a
+future phase could add a dedicated tool if this reasoning step proves unreliable at scale.
+
 ## Conversation management (Phase 2)
 
 `AI Assistant Conversation` doctype (`title`/`user`/`pinned`/`last_activity`, autoname hash,

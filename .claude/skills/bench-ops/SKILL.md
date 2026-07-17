@@ -54,6 +54,25 @@ bench --site <site> export-fixtures --app aimatic # sync Desk customizations int
 bench --site <site> backup                        # before any production change
 ```
 
+## Python code changes need a worker restart, not just migrate/build
+
+This bench's gunicorn runs `--preload` (`ps -eo cmd | grep gunicorn` shows it; supervisor program
+`frappe-bench-frappe-web`) — the whole app is imported **once** in the master process before
+forking all workers, and every worker shares that preloaded module state. `bench --site <site>
+migrate` (schema) and `bench build`/`clear-cache` (JS/CSS/Redis) do **not** touch this — a new or
+changed Python function (a new whitelisted API method, a modified doc_event handler, anything)
+is invisible to already-running workers until they're restarted, even though `bench --site <site>
+execute <path>` (which spawns its own fresh process) sees it immediately. Symptom: a function you
+just added/edited works when called directly via `bench execute` but the live site 500s with
+`AttributeError: module '...' has no attribute '...'` or silently keeps old behavior when hit
+over HTTP. Confirmed live 2026-07-18 adding new `aimatic.ai.api` endpoints.
+
+Fix: `sudo supervisorctl restart frappe-bench-frappe-web` — needs a real privileged terminal,
+same as the nginx reload above; ask the user to run it themselves. `bench restart` fails the same
+way (`sudo supervisorctl status` under the hood) unless run somewhere with passwordless sudo.
+Always deploy Python changes as: edit → (`migrate` if schema changed) → **restart the web
+worker** → re-verify against the live site, not just via `bench execute`.
+
 ## Do not run the test suite
 
 Never run `bench run-tests` — the user runs tests themselves. `offline_pos/test_api.py` is the

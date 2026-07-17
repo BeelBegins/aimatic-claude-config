@@ -1,0 +1,409 @@
+---
+name: ai-assistant-console
+description: Working on aimatic's AI Assistant Console (aimatic/ai/, aimatic/aimatic/page/ai_assistant_console/) — the Nemotron/OpenRouter-backed conversational BI assistant, its 16+ fixed tools, the dynamic-report fallback, the structured KPI/chart/table/insight response contract, conversation management, saved reports/dashboards/export, or scheduled questions/alert rules. Use whenever ai/api.py, ai/tools*.py, ai/*.py, or ai_assistant_console.js/.css changes, or a new AI Business Intelligence Console phase is being built.
+---
+
+# AI Assistant Console (multi-phase AI Business Intelligence Console)
+
+Nemotron/OpenRouter client plus a conversational analytics assistant over sales/purchases/
+vendors/inventory/customers, at its own route `ai-assistant-console`
+(`aimatic/aimatic/page/ai_assistant_console/`, same route-collision-avoidance reasoning as
+`vendor-performance-console`/`sales-dashboard-console` — see the `desk-navigation` skill),
+reachable via the root `Aimatic` workspace's "AI Assistant" shortcut.
+
+Built as a multi-phase "AI Business Intelligence Console" per an explicit product spec
+(2026-07-17). **Phase 1** (2026-07-17: structured answers, KPI/chart/table/insight rendering,
+smart context bar, role-aware suggestions, 5 new domain tools), **Phase 2** (2026-07-18:
+conversation management, a controlled dynamic-report fallback layer, browser-native voice input,
+a collapsible left/right panel layout), and **Phase 3** (2026-07-18: save/pin answers, a
+dashboard builder, working CSV/Excel export, scheduled question re-runs, insight-detector-based
+alert rules) are all live. ABC/XYZ classification and role-specific landing dashboards remain
+later phases, not yet built.
+
+**Working pattern**: Nemotron did the actual design/code drafting for nearly all three phases via
+the `ask-nemotron` CLI (see the `reference_ask_nemotron_cli` memory), with a human/Claude review
+pass catching and fixing real bugs before every single deploy (see "Gotchas found only by running
+it" below). This division of labor — Nemotron drafts, a review pass verifies against live
+schema/data/browser behavior before trusting it — is the proven, expected pattern for future
+phases too, not something that gets safer to skip as the codebase grows. **Exception**:
+OpenRouter's free tier hit its shared daily quota mid-Phase-2 (`free-models-per-day`, resets
+~00:00 UTC) — the dynamic-report layer, voice input, and panel layout were written directly for
+that stretch, same review rigor applied; Phase 3 resumed the Nemotron-drafts workflow once the
+quota reset.
+
+**Deployment gotcha — Python changes need a worker restart, not just migrate/build**: this
+bench's gunicorn runs `--preload` (see bench-ops skill), so a whitelisted API change is invisible
+to already-running workers — `bench --site <site> execute <path>` sees it immediately (fresh
+process) but the live site 500s with `AttributeError: ... has no attribute ...` until `sudo
+supervisorctl restart frappe-bench-frappe-web` runs. This bit every phase of this module at least
+once, twice in Phase 3 alone (once for save/dashboard/export, again for scheduling/alerts) —
+always restart after any `ai/*.py` change before trusting a live-site test.
+
+## Nemotron client and model config
+
+`nemotron_client.py` — `get_chat_completion(messages, tools=None, tool_choice=None,
+temperature=0.2, max_tokens=1024, model=None)` wraps OpenRouter's `/chat/completions` endpoint
+(`requests`, same timeout/header pattern as `fbr_pos/api.py:submit_payload_to_fbr`) and returns
+the raw assistant *message* dict (`content`/`tool_calls`), raising `NemotronError` on any failure
+rather than ever returning a partial/empty result. `get_completion(prompt, ...)` is a text-only
+wrapper (used by `api.py:ping`). Config comes from `frappe.conf` (`openrouter_api_key`,
+`openrouter_nemotron_model` — set via `bench set-config -g <key> <value>`, landing in
+`sites/common_site_config.json` so all three sites share one key), never hardcoded. Hardcoded
+fallback in code is `nvidia/nemotron-3-super-120b-a12b`, but the bench-wide config key is set to
+`nvidia/nemotron-3-ultra-550b-a55b:free` (2026-07-17, upgraded from the 120B Super — same free
+OpenRouter tier, larger model, 1M context) so that's the model actually used everywhere unless
+overridden per-call. The personal `ask-nemotron` CLI (`reference_ask_nemotron_cli` memory) has its
+own separate hardcoded `DEFAULT_MODEL` since it doesn't read this config key — kept in sync by
+hand, not automatically. OpenRouter's `/api/v1/models` is the source of truth for available slugs.
+
+**The free tier has a shared daily AND concurrency cap** — seen in practice: a transient
+`ResourceExhausted: Worker local total request limit reached (32/32)` (concurrency) and a hard
+`Rate limit exceeded: free-models-per-day` (daily quota, resets ~00:00 UTC) that took the entire
+production AI Assistant down site-wide for szl/siezal/hsm simultaneously (they share one key) mid-
+Phase-2 until it reset. `ask()` surfaces either as a normal `NemotronError` → user-facing error
+message, not a crash.
+
+## Tools: 16 fixed + 1 controlled dynamic fallback
+
+`tools.py` (11 tools) + `tools_extended.py` (5 more, Phase 1) — all cheap `SUM`/`GROUP BY`
+aggregates with capped limits (no per-item ledger replay, no N+1 queries), Company/Branch-
+permission scoped via `_resolve_branch_filter`/`_branch_warehouses` (mirroring
+`sales_dashboard/api.py`'s branch-scoping discipline).
+
+- `tools.py`: `get_sales_overview`, `get_purchase_overview`, `rank_vendors` (gross-margin-based,
+  via each item's `Item Default.default_supplier`), `get_inventory_vs_sales` (stock-vs-trailing-
+  sales-velocity as days-of-stock), `get_branch_comparison`, `get_payment_mode_split`,
+  `get_returns_overview`, `get_active_shifts`, `get_top_selling_items`,
+  `get_outstanding_payables_overview`, `get_gross_margin_overview`.
+- `tools_extended.py`: `get_item_price_history` (item_code, months — PR+PI cost history reusing
+  `purchase_printing.py`'s exact join pattern, current MRP from `Item.custom_mrp`, per-branch
+  selling rates from `Item Price` — **not** `Item.custom_shelf_price`, which doesn't exist; see
+  shelf-pricing skill, shelf price only ever lives on `Purchase Receipt Item` rows and propagates
+  into branch `Item Price` records, never onto `Item` itself), `get_price_increases` (items with a
+  ≥N% purchase-cost jump in a window, single-query-then-Python-group, no N+1),
+  `get_dead_stock_detail` (proper dead-stock list via actual last-sale-date from Stock Ledger
+  Entry, distinct from `get_inventory_vs_sales`'s window-ratio heuristic — returns
+  `total_dead_stock_value` across *all* qualifying items, not just the returned page, so "dead
+  stock worth more than X" questions stay accurate under a row limit), `get_top_customers`,
+  `get_receivables_overview` (Sales Invoice/customer mirror of `get_outstanding_payables_overview`
+  — safe to query directly, unlike item-level revenue this header-level `outstanding_amount` isn't
+  duplicated by POS consolidation). Each file's own `TOOL_SPECS`/`TOOL_DISPATCH` get merged in
+  `api.py`.
+
+**`dynamic_report.py`** (Phase 2, the "AI-Generated Reports" controlled fallback) — the one path
+in this whole module where a hardcoded whitelist, not the LLM, decides what SQL can run.
+`run_dynamic_report(doctype, fields, aggregate_field, aggregate_fn, filters, group_by, order_by,
+date_from, date_to, limit)` only accepts `doctype` from `_ALLOWED_DOCTYPES` (`POS Invoice`,
+`Purchase Invoice`, `Purchase Receipt`, `Item`, `Customer`, `Supplier` — deliberately excludes
+`Sales Invoice`, same revenue-double-counting reason as everywhere else) and every
+field/group-by/order-by/aggregate name against that doctype's own fixed field whitelist; company
+and branch scoping (via `tools._resolve_company`/`_resolve_branch_filter`, same empty-branch-
+list-returns-empty-result guard as every other tool) are always force-applied server-side, never
+LLM-controlled. All data access goes through `frappe.db.get_list()`, never `frappe.db.sql()` with
+interpolated strings.
+
+**Aggregate fields must use Frappe's dict syntax** (`{"SUM": "grand_total", "as": "value"}`), not
+an f-string SQL fragment (`f"SUM({field}) as value"`) — confirmed live: `get_list` itself rejects
+any raw function-call string in `fields` with `"SQL functions are not allowed as strings in
+SELECT... Use dict syntax like {'COUNT': '*'} instead"`, a second independent defense on top of
+this file's own whitelist (Frappe's own `FUNCTION_MAPPING` in `frappe/database/query.py` happens
+to be the exact same 5 names as `ALLOWED_AGGREGATIONS`). A row-shape not known ahead of time
+(unlike the 16 fixed tools) means `answer_builder.py`'s `_table_for_run_dynamic_report` infers
+columns from the first result row's keys via a small type-name map, rather than a hand-written
+column list.
+
+## Revenue double-counting gotcha (found and fixed 2026-07-17)
+
+Any query that `UNION ALL`s `Sales Invoice Item` with `POS Invoice Item` to total *revenue*
+(`base_net_amount`) double-counts every POS sale that's gone through a shift close. Reason: `POS
+Closing Entry` consolidates its POS Invoices into a **new, separate** `Sales Invoice` with its own
+mirrored item rows (`POS Invoice Merge Log`/`map_doc`, see `offline-pos` skill) — but the
+*original* POS Invoices stay `docstatus = 1`, never cancelled. Confirmed on `szl`: item
+`0000000000002` had identical 31 rows / 1,587 qty / PKR 193,306.44 in both `Sales Invoice Item`
+and `POS Invoice Item` for the same underlying sales; `get_top_selling_items` initially showed
+exactly double (386,612.87) before the fix. Separately confirmed **every submitted Sales Invoice
+on this bench is itself a POS-consolidation output** — 49 total, 37 as `consolidated_invoice` + 12
+as `consolidated_credit_note` (POS returns), zero standalone — so dropping the Sales Invoice arm
+entirely loses no genuine non-POS revenue. COGS queries via Stock Ledger Entry (`voucher_type IN
+('Sales Invoice', 'POS Invoice')`) are **not** affected — `POSInvoice.on_submit()` never calls
+`update_stock_ledger()` itself, so SLE rows only ever exist once, tied to the consolidated Sales
+Invoice. Since `POS Settings.invoice_type` is `"POS Invoice"` on all three sites, **POS Invoice
+alone is the complete, correct source of POS revenue** — never union it with Sales Invoice Item
+for a revenue total. Fixed in this module's `get_sales_overview`/`get_top_selling_items`/
+`rank_vendors` and in `vendor_performance/api.py`'s `_get_sales_summary`/`_get_sales_by_item`/
+`_get_recent_sales` — the latter had been overstating sales revenue and gross margin % on the
+shipped Vendor Performance console for any supplier with closed-shift sales.
+
+## Structured response contract and assembly pipeline
+
+**`response_schema.py`** — plain stdlib `@dataclass(frozen=True)` models (no Pydantic dependency
+in this app), each with its own `to_dict()`: `Answer`, `Context` (company/branch/date_range/
+comparison_period/user_role/permissions), `KPI`, `Chart`/`ChartData`/`ChartOptions`, `Table`/
+`TableColumn`/`Pagination`/`DrillDown`, `Insight`, `Warning`, `Source`, `Action`, and the
+top-level `StructuredResponse` container. `ask()` returns `StructuredResponse.to_dict()` directly
+as `r.message` — **not** `{"reply": "..."}` (that shape only survives in `get_recent_history`'s
+restored-history rows, always plain text since `_log_turn` persists the reply string either way).
+`DateRange`/`ComparisonPeriod` hand-build their own `to_dict()` instead of `dataclasses.asdict()`
+because their field is named `from_` (Python keyword collision) but must serialize as JSON key
+`"from"`.
+
+**`chart_recommender.py`** — deterministic (no LLM) `recommend_chart(tool_name, result) -> Chart |
+None`, one private `_chart_get_<tool>` function per tool dispatched via a lookup dict, since every
+tool's result shape is already known exactly (no generic shape-sniffing). Single-branch/short-list
+results correctly suppress a chart. Bar-chart-producing functions cap at `_MAX_CHART_BARS = 10` —
+beyond that, labels truncate illegibly (confirmed live: a 48-item dead-stock chart rendered as
+unreadable 2-character label stubs before this cap was added); the table for the same answer
+still shows every row.
+
+**`insight_generator.py`** — rule-based (no LLM) `generate_insights(tool_results: dict[str,
+dict]) -> list[Insight]`, one `_detect_*` function per rule, each gracefully no-op if its required
+tool wasn't called this turn — detectors never raise. Real detector names (exact, used verbatim as
+`AI Alert Rule.rule_name` options minus the `_detect_` prefix): `_detect_dead_stock`,
+`_detect_price_increases`, `_detect_stockout_risk`, `_detect_negative_vendor_margin`,
+`_detect_branch_underperformance`, `_detect_low_gross_margin`, `_detect_payables_concentration`,
+`_detect_high_return_rate`, `_detect_positive_margin_signal` (this last one has no matching alert
+rule — it's a "good news" signal, not something you'd alert on). None currently accept a threshold
+override kwarg — each has its threshold hardcoded inline (e.g. `if margin_pct < 10`). Dead-stock
+detection prefers `get_dead_stock_detail` (precise, actual last-sale-date) when present in the
+turn's tool results, falling back to `get_inventory_vs_sales`'s window-ratio heuristic only when
+the newer tool wasn't called.
+
+**`report_registry.py`** — lightweight in-Python `DataSource` catalogue (no new DocType):
+`TOOL_REGISTRY` has one entry per tool (`source_type="tool"` — **not** `"report"`/`"chart"`/
+`"number_card"`, a mislabeling Nemotron's first draft made across all 16 entries, since that field
+distinguishes "one of our own controlled Python tools" from "a discovered Frappe Report/Chart/
+Number Card record" for anything downstream that branches on it); `discover_frappe_reports()`
+finds real Query/Script Reports from `Accounts`/`Buying`/`Selling`/`Stock`/`Aimatic` modules (132
+found on `szl`, process-lifetime cached); `get_registry()` merges both (tools win on collision);
+`find_sources_for_question()` is a Phase-1 keyword-overlap heuristic (no LLM) used to populate
+`sources[]`, expected to become LLM-assisted in a later phase.
+
+**`answer_builder.py`** — the orchestrator `build_response(question, reply_text, tool_results,
+company, branch_names, user_role) -> StructuredResponse`. Per-tool `_kpis_for_<tool>`/
+`_table_for_<tool>` dispatch functions (same explicit-per-tool pattern as `chart_recommender.py`)
+turn each tool's result into KPI cards / a Table; calls `chart_recommender.recommend_chart` and
+`insight_generator.generate_insights`; looks up `sources[]` via `report_registry.get_registry()`;
+builds a short rule-based `follow_up_questions[]` list keyed off which tool *categories* were
+used. `answer.confidence`/`data_quality`/`intent`/`entities` and `context.permissions.can_export`/
+`can_schedule` are **explicit Phase-1 placeholders** (binary tool-data-present-or-not heuristic,
+`intent="general"`, `entities={}`, exports/scheduling hard-`False`) — honest stand-ins, not real
+ML/intent-classification/export-backend, until a later phase actually builds those.
+
+## api.py — the conversational entrypoint
+
+`ping()` is a System Manager-gated whitelisted connectivity test. `ask(message, history=None,
+conversation=None)` is the conversational entrypoint, role-gated to `{"System Manager", "Sales
+Manager", "Accounts Manager", "POS Supervisor"}`. `history` is a JSON-encoded list of prior
+`{role, content}` user/assistant *text* turns only (never raw tool-call internals), capped at
+`_MAX_HISTORY_TURNS = 20`, rebuilt fresh every call. Loops up to `_MAX_TOOL_ITERATIONS = 5`: calls
+`get_chat_completion` with the merged `TOOL_SPECS` (tools + tools_extended + dynamic_report),
+dispatches `tool_calls` via the merged `TOOL_DISPATCH`, accumulates each *successful* (no
+`"error"` key) result into a `tool_results` dict keyed by tool name. On the final reply, resolves
+`company`/`branch_names` and `user_role`, calls `answer_builder.build_response(...)`, persists via
+`_log_turn`, and returns `StructuredResponse.to_dict()`. Every tool is read-only — the assistant
+can never create, submit, or modify a document.
+
+## Conversation management (Phase 2)
+
+`AI Assistant Conversation` doctype (`title`/`user`/`pinned`/`last_activity`, autoname hash,
+System-Manager-only doctype perms same as `AI Assistant Message`) supersedes the flat, ungrouped
+Phase-1 history model. `AI Assistant Message` gained three fields: `conversation` (Link, not
+mandatory — pre-Phase-2 rows are left blank, never backfilled), `feedback` (Select, blank/up/
+down), `feedback_note`.
+
+`api.py` endpoints, all ownership-checked via `_check_conversation_ownership`
+(`AI Assistant Conversation.user == frappe.session.user`, else `frappe.PermissionError`):
+`start_conversation`, `list_conversations` (pinned first, then `last_activity` desc),
+`get_conversation_messages`, `rename_conversation`, `pin_conversation`, `delete_conversation`
+(cascades to its messages), `submit_feedback`.
+
+**`ask()` itself gained an optional `conversation` param and validates ownership on it too before
+use** — every other Phase-2 endpoint already had this check, but the first draft left `ask()` able
+to log a turn into a conversation name it never verified the caller owned; caught in review before
+deploy, not live. When `conversation` is omitted, behavior is byte-for-byte identical to Phase 1
+(no grouping) — grouping is opt-in per call. The first turn of a new conversation auto-titles
+itself from the first ~60 chars of the user's message via one combined
+`frappe.db.set_value(doctype, name, {dict of fields})` call alongside bumping `last_activity`.
+
+**Conversation persistence** (2026-07-17 product decision, extended 2026-07-18): every successful
+`ask()` call writes both the question and the answer (`reply`, plain text — never the structured
+dict) to `AI Assistant Message` via `_log_turn` — best-effort, swallows its own failures
+(`frappe.log_error`) rather than ever breaking the chat response. The doctype's own permissions
+are System Manager-only; every other allowed role reaches only *their own* history through
+`get_recent_history(limit=40)` (Phase 1, flat/ungrouped, still a fallback path) or
+`get_conversation_messages` (Phase 2, grouped, ownership-checked). Retention:
+`ai/tasks.py:purge_old_ai_messages`, wired into `hooks.py`'s `scheduler_events["daily"]`, deletes
+rows older than `RETENTION_DAYS = 30` — unaffected by conversation grouping.
+
+## Save / Dashboard / Export (Phase 3)
+
+**Doctypes** (all `autoname: "hash"`, module `Aimatic`, System-Manager-only base perms, ownership
+enforced at the API layer):
+- `AI Saved Report` — title/question/context_snapshot/response_snapshot/tool_results_snapshot/
+  user/pinned/last_refreshed. The snapshot fields hold `Context.to_dict()`/
+  `StructuredResponse.to_dict()` JSON exactly as the client had them, so a saved report displays
+  instantly with zero OpenRouter cost; `refresh_saved_report` re-runs the original question
+  through the real `ask()` pipeline and overwrites `response_snapshot`.
+- `AI Dashboard` — title/user/`widgets` child table.
+- `AI Dashboard Widget` — child table, `istable: 1`, only `saved_report` + `size` fields —
+  deliberately **no custom `idx` field**, since every Frappe child table already has one built in
+  for row ordering and a same-named custom field would collide with it. Reordering is just
+  rebuilding the parent's widget list in the new order and saving; Frappe reassigns `idx` from
+  list position automatically.
+
+**API** (`api.py`) — `save_report`/`list_saved_reports`/`get_saved_report`/
+`rename_saved_report`/`pin_saved_report`/`delete_saved_report`/`refresh_saved_report` and
+`create_dashboard`/`list_dashboards`/`get_dashboard`/`add_widget_to_dashboard`/
+`remove_widget_from_dashboard`/`reorder_widgets`/`rename_dashboard`/`delete_dashboard`, all behind
+`_check_saved_report_ownership`/`_check_dashboard_ownership` (same `frappe.db.get_value(...,
+"user")` pattern as `_check_conversation_ownership`). `add_widget_to_dashboard` checks ownership
+of **both** the dashboard and the saved report being linked, so a user can never pull another
+user's saved report into their own dashboard.
+
+**Return shapes are deliberately flat** (`{"name": doc.name}`, not `{"saved_report": {...}}`/
+`{"dashboard": {...}}`) — the first frontend draft assumed nested wrapper keys it never actually
+got from the server (drafted without the real `api.py` in context) and silently no-op'd on every
+save/dashboard-open until caught live. **Always paste the actual current server return shape into
+a frontend-drafting prompt, not just its own name** — this is a repeatable failure mode, not a
+one-off.
+
+**Export**: `export_table(table_json, filename, format)` builds `data = [[header...], [row...],
+...]` from a client-supplied `Table.to_dict()`-shaped JSON string and calls
+`frappe.utils.csvutils.build_csv_response(data, filename)` /
+`frappe.utils.xlsxutils.build_xlsx_response(data, filename)` — **not** `get_csv_content` (doesn't
+exist in this Frappe version) or hand-rolled `openpyxl` (this version's `xlsxutils` wraps
+`xlsxwriter` instead) — both set `frappe.response` directly and are the verified-live,
+version-correct helpers. A whitelisted method that sets `frappe.response` this way **cannot** be
+called via normal `frappe.call()` (that expects JSON) — the client must use Frappe's own
+`open_url_post('/api/method/aimatic.ai.api.export_table', {...})`
+(`frappe/public/js/frappe/utils/urllib.js`, same mechanism `data_exporter.js` uses for the
+standard list-view Export button), which POSTs a real HTML form so the browser treats the
+response as a normal file-download navigation.
+
+## Scheduling + Alerts (Phase 3)
+
+`ai/tasks.py`, wired into `hooks.py`'s `scheduler_events["daily"]` alongside
+`purge_old_ai_messages`:
+
+- `run_scheduled_questions()` finds enabled `Scheduled Question` rows due by simple date-math
+  (`last_run` blank → due now; Daily/Weekly/Monthly → `add_days`/`add_months` off `last_run`, no
+  cron parser).
+- `check_alert_rules()` evaluates each enabled `AI Alert Rule` by calling the ONE tool its
+  `rule_name` needs directly (not the whole `generate_insights()` sweep) and passing that single
+  result straight to the matching `_detect_*` function.
+
+**Both must run each row/rule as its owning user**, not whatever the background job's own default
+session is — `frappe.set_user(row.user)` before any tool/`ask()` call, reset in a `finally` —
+since every tool's company/branch resolution and `ask()`'s own `_check_role()` implicitly depend
+on `frappe.session.user`; a demoted user's rule fails that one `_check_role()` and is logged/
+skipped rather than aborting the whole daily run for every other user's rows.
+
+`threshold_override` is stored on `AI Alert Rule` for a future phase but **not yet applied** —
+none of `insight_generator.py`'s `_detect_*` functions currently accept an override kwarg. A
+rule's own hardcoded default is always what runs.
+
+**Two real bugs found only by actually running the scheduler function, not by reading the code**:
+1. The first draft imported `get_dead_stock_detail`/`get_price_increases` from `aimatic.ai.tools`
+   — they're actually in `aimatic.ai.tools_extended`, an `ImportError` that would have silently
+   broken alert checking for those two rules in production.
+2. The first draft's `try/except` around each scheduled question / alert rule only wrapped the
+   `ask()`/tool-call step, not the `frappe.sendmail(...)`/`frappe.db.set_value(...)` steps after
+   it — so a mail failure (confirmed live: szl has no outgoing Email Account configured) raised
+   straight out of the loop and aborted every remaining row for every other user in the same run.
+   Fixed by wrapping the entire per-row block (call → email → `last_run`/`last_triggered` update →
+   explicit `frappe.db.commit()`) in one try/except with `frappe.db.rollback()` on failure — this
+   also means a question whose email failed to send correctly does **not** get `last_run`
+   updated, so it's retried on the next daily run rather than silently marked done despite never
+   reaching the recipient.
+
+## Frontend (`ai_assistant_console.js`/`.css`)
+
+Built on `frappe.ui.make_app_page` and Frappe's own theme CSS variables for light/dark
+correctness.
+
+**Phase 1 (2026-07-17)**:
+- **Smart Context Bar**: Company/Branch/Date Range fields via `this.page.add_field(df, parent)` —
+  note `parent` is the function's **second positional argument**, not a key inside the field-
+  definition object; passing it as `{..., parent: $el}` silently no-ops (Frappe's `add_field`
+  just falls back to the page's default toolbar area), caught only by live-browser DOM inspection
+  showing `childCount: 0` on the intended container, not by any API-level test. Folded into the
+  message text as a natural-language prefix (`"For company X, branch Y, this month, <question>"`)
+  since `ask()` has no structured filter params yet.
+- **Role-aware suggested questions** keyed off `frappe.user_roles`.
+- **Rich answer rendering** per turn: KPI cards, one `frappe.Chart` per `charts[]` entry,
+  sortable/click-to-navigate tables, severity-colored insights, follow-up chips, sources footer —
+  history restored via `get_recent_history` on page load still renders as plain bubbles.
+- `Charts[]` render into a plain `<div>` (`frappe.Chart` builds an SVG into its container —
+  despite the name, it does **not** take an HTML5 `<canvas>` element), and only after that div is
+  actually attached to the document (a detached-element chart measures 0/NaN width and throws SVG
+  attribute errors — fixed by a two-phase build-skeleton-then-attach-then-`init_chart` pattern,
+  same as `sales_dashboard_console.js`'s existing convention).
+- A rich turn scrolls into view via `scrollIntoView({block: 'start'})`, not
+  `scrollTop(scrollHeight)` — the latter (correct for short plain bubbles, still used by
+  `append_bubble`) would scroll a tall rich answer's KPIs/chart at the top out of view above the
+  fold.
+- Insight cards render only `title`/`description`/an "Actionable" flag — `supporting_data` stays
+  in the API response for future drill-down but is deliberately never dumped as raw JSON into the
+  UI.
+- All of the above were real bugs in Nemotron's first draft caught only by actually driving the
+  live page with Playwright against real production data — API-level/unit-style testing alone
+  would not have caught any of them.
+
+**Phase 2 additions (2026-07-18)**:
+- Three-column layout (`.ai-assistant-layout`: left sidebar, center chat, right panel).
+- **Left sidebar**: conversation list (search/rename/pin/delete), "New Analysis" button. First
+  message of a fresh session has no conversation yet — `send_message` lazily calls
+  `start_conversation` before `ask()` rather than forcing an explicit click first; page (re)load
+  auto-opens the most recent conversation (mirrors Phase 1's flat-history continuity) but only on
+  initial load, never on routine `refresh_conversation_list()` calls after send/rename/pin/delete.
+- **Right panel**: "Scope & Sources" for the *last* answer, via `update_right_panel(response)`.
+- **Both panels collapse** — but their toggle buttons must **not** live inside the element they
+  collapse: the first draft put `.ai-assistant-sidebar-collapse` inside `.ai-assistant-sidebar`
+  itself, and the collapsed-state CSS's `pointer-events: none` cascaded to the toggle button too,
+  permanently stranding it — confirmed live, the click fell through to *Frappe's own standard Desk
+  sidebar* underneath. Fixed by moving each toggle into its own persistent ~28px-wide sibling rail
+  (`.ai-assistant-sidebar-rail` / `.ai-assistant-right-panel-rail`) that's never itself collapsed,
+  simplifying the collapsed rule to plain `display: none`.
+- **Voice input** (`init_voice`/`start_recording`/`stop_recording`) uses the browser's own
+  `SpeechRecognition`/`webkitSpeechRecognition` — no new backend. Audio may be routed to the
+  *browser vendor's* own cloud recognition (e.g. Chrome→Google), not to aimatic/OpenRouter,
+  surfaced via an explicit privacy line while recording. Transcript lands in the editable textarea,
+  never auto-submitted. A live level-meter bar uses a **separate** `getUserMedia`+`AnalyserNode`
+  (SpeechRecognition exposes no raw audio data) — its `requestAnimationFrame` tick must not be
+  fought by the 500ms duration-display timer rebuilding the same DOM nodes: the duration timer
+  patches only the `.ai-assistant-voice-duration` text node, never the full
+  `render_voice_status()` rebuild. Mixed Urdu-English in one utterance isn't reliably supported (one
+  language per session) — a language-switch button substitutes for true code-switching. States:
+  idle/recording/ready/failed/permission_denied/network_error/unsupported. In headless/automated
+  tests with a fake media device, recognition legitimately fails fast with no real speech content —
+  expected, not a code defect, since it still surfaces the correct `failed` state.
+
+**Phase 3 additions (2026-07-18)**:
+- **Save button** on every rich answer (after follow-up chips) calls `save_report` with the
+  question (passed as a closure argument from `_send_message_now` through
+  `render_rich_answer(response, question)`, not read from the DOM) and the live
+  context/response as JSON snapshots. On success, `prompt_add_to_dashboard` offers to add it to
+  one of the user's dashboards via a plain `prompt()` asking for the dashboard's title
+  (deliberately simple for this phase — a real dropdown is later-phase polish, not a correctness
+  gap; the title-match rejection path was verified live and works as designed).
+- **Export buttons** (CSV/XLSX) in every table's title row use `open_url_post`, never
+  `frappe.call`.
+- **Dashboard section** in the sidebar (list + "+" create button) and a **dashboard view** that
+  swaps in for the whole chat pane (`show_dashboard_view`/`hide_dashboard_view` toggle `display`,
+  no page navigation) — widget cards **reuse the exact same `render_kpis`/`build_chart_wrap`+
+  `init_chart`/`render_table` methods** the live chat already uses against each widget's stored
+  `response_snapshot`, so a dashboard never needs separate rendering logic to stay in sync with
+  the live answer format; insights/follow-ups/sources are skipped in widget cards to keep them
+  compact. Widget size (Small/Medium/Large) maps to a flexbox width class
+  (`ai-assistant-widget-sm/md/lg`).
+- **Both `prompt_add_to_dashboard`'s success and the widget-remove handler must call
+  `refresh_dashboard_list()`** after their own `frappe.call` succeeds — the sidebar's per-dashboard
+  widget-count badge is a separate cached read (`list_dashboards`) from the dashboard-view's own
+  widget list, and doesn't update on its own; confirmed live (a widget rendered correctly in the
+  just-opened dashboard while the sidebar still showed its stale pre-add count) before being fixed.
+
+## Working safely
+
+Update this skill (not `CLAUDE.md` directly — see that file's own "Keeping this file current"
+rule) whenever a new phase ships, a new tool/doctype/endpoint is added, or a new gotcha is found
+live. Keep `CLAUDE.md`'s own `ai/` entry to a short summary + pointer here.

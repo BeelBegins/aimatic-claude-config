@@ -7,17 +7,25 @@ description: Adding, editing, or renaming a Print Format or Report in aimatic (P
 
 ## The mechanism: Frappe's native module-doc sync, not a custom one
 
-All 8 of aimatic's Print Formats — `AIM Barcode Label`, `AIM Shelf Label A4`,
+All 9 of aimatic's Print Formats — `AIM Barcode Label`, `AIM Shelf Label A4`,
 `Purchase Invoice Custom Layout`, `Purchase Receipt Custom Layout`, `POS 80x3276 v2`,
-`POS Updated Print Layout`, `pos80x3276`, `Purchase Order Updated Lyaout` — ship as plain JSON
+`POS Updated Print Layout`, `pos80x3276`, `Purchase Order Updated Lyaout`,
+`Stock Acknowledgement` — ship as plain JSON
 files, the same mechanism Frappe/ERPNext use for their own bundled print formats:
 
 - `aimatic/label_printing/print_format/<scrubbed_name>/<scrubbed_name>.json` (2 files, module
   `Label Printing`) — `aim_barcode_label`, `aim_shelf_label_a4`.
-- `aimatic/aimatic/print_format/<scrubbed_name>/<scrubbed_name>.json` (6 files, module `Aimatic`)
+- `aimatic/aimatic/print_format/<scrubbed_name>/<scrubbed_name>.json` (7 files, module `Aimatic`)
   — `pos80x3276`, `pos_80x3276_v2`, `pos_updated_print_layout`,
   `purchase_invoice_custom_layout`, `purchase_order_updated_lyaout`,
-  `purchase_receipt_custom_layout`.
+  `purchase_receipt_custom_layout`, `stock_acknowledgement`.
+
+`Stock Acknowledgement` (Purchase Receipt, added 2026-07-17) is a warehouse-floor handover
+document, deliberately stripped of everything `Purchase Receipt Custom Layout` shows (no vendor
+rate/GST/margin/cost data) — just S#/barcode/description/UOM/ordered/received/rejected qty plus
+three signature blocks (Received By / Checked By (Store Incharge) / Approved By). It reuses
+`aimatic.purchase_printing.get_purchase_print_item_context` purely for the barcode lookup, ignoring
+that helper's price fields.
 
 A Print Format's own `module` field determines which app's folder Frappe looks in — that's why
 the 6 non-label ones live under `aimatic/aimatic/print_format/` (module reassigned to `Aimatic`)

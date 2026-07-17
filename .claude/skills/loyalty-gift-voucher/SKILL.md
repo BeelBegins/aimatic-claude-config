@@ -34,8 +34,10 @@ the *earning rate*: item-group-weighted instead of ERPNext's flat whole-invoice 
 
 `gift_voucher/events.py:on_submit_issue_gift_voucher` auto-issues a voucher based on configured
 value brackets (`Gift Voucher Criteria`, matched via `_find_matching_criteria(company, branch,
-grand_total)` in `events.py` — bracket matching is on invoice `grand_total`, resolved per
-company **and branch** via `fbr_pos.payload_builder.get_invoice_branch`).
+net_total)` in `events.py` — bracket matching is on the invoice's `grand_total` **net of any
+Gift Voucher/loyalty redemption on the same sale** (see the dedicated section below, fixed
+2026-07-17 — this was a real bug before then), resolved per company **and branch** via
+`fbr_pos.payload_builder.get_invoice_branch`).
 `on_cancel_gift_voucher` cancels/reactivates on invoice cancel. Redemption is a separate later
 sale: `gift_voucher/api.py`'s `list_customer_gift_vouchers` / `validate_gift_voucher_code`, and
 `offline_pos/api.py`'s `preview_cart` / `submit_online_sale` both take a `gift_voucher_code`
@@ -69,6 +71,34 @@ Redemption is finalized race-safely (conditional `UPDATE ... WHERE status='Activ
 **after** `doc.submit()` succeeds, inside the same savepoint that handles idempotent
 `terminal_invoice_id` replay in `offline_pos/api.py` — don't move voucher finalization earlier
 in the flow, or a failed/retried submit could burn a voucher with no corresponding sale.
+
+## New-voucher bracket matching nets out same-sale redemptions — fixed 2026-07-17
+
+Real incident on production `siezal`: invoice `ACC-PSINV-2026-00027` (`grand_total` Rs 15,414)
+redeemed an existing Rs 663.36 voucher as a "Gift Voucher" payment row, then *still* issued a
+fresh Rs 616.56 voucher (4% of the full Rs 15,414) on the same submit — because
+`on_submit_issue_gift_voucher` matched brackets on raw `doc.grand_total`, and (per the section
+above) a Gift Voucher/loyalty redemption never touches that field by design. The customer's real
+net spend was only Rs 14,750.64 (under the Rs 15,000 bracket floor), but the bracket check saw
+the full undiminished Rs 15,414 and issued anyway.
+
+Fixed by `_net_of_same_sale_redemptions(doc)` — subtracts any "Gift Voucher" Mode of Payment row
+amount and any `loyalty_amount` (loyalty points redeemed on the same invoice; ERPNext adds this
+to `paid_amount`, the same non-grand-total-touching pattern, confirmed in
+`erpnext/controllers/taxes_and_totals.py`) from `grand_total` before bracket matching, and
+additionally re-checks the matched bracket's own `minimum_redemption_value` against that net
+figure (independent of, but in practice currently equal to, the bracket's `min_value`). The
+awarded voucher's amount is now computed off this same net figure too, not the raw `grand_total`
+— a bill that still clears the bar after a same-sale redemption shouldn't be rewarded on money it
+didn't really collect.
+
+**Bracket matching for new-voucher issuance is now net of same-sale redemptions; the FBR-facing
+`grand_total`/`net_total` on the invoice itself are untouched** — don't conflate the two, and
+don't extend this net-of-redemption treatment to anything FBR-facing.
+
+Known, accepted: the voucher `VXFNABMQQ3` issued to that invoice before this fix landed was left
+active (explicit decision, not retroactively cancelled) — a one-off grandfathered exception, not
+a precedent for handling future incidents the same way.
 
 ## Client-side redemption (Electron) — applied via Benefits (F7), not Payment (F6)
 

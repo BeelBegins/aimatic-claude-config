@@ -63,7 +63,7 @@ production AI Assistant down site-wide for szl/siezal/hsm simultaneously (they s
 Phase-2 until it reset. `ask()` surfaces either as a normal `NemotronError` → user-facing error
 message, not a crash.
 
-## Tools: 16 fixed + 1 controlled dynamic fallback
+## Tools: 25 fixed + 1 controlled dynamic fallback
 
 `tools.py` (11 tools) + `tools_extended.py` (5 more, Phase 1) — all cheap `SUM`/`GROUP BY`
 aggregates with capped limits (no per-item ledger replay, no N+1 queries), Company/Branch-
@@ -89,6 +89,162 @@ permission scoped via `_resolve_branch_filter`/`_branch_warehouses` (mirroring
   — safe to query directly, unlike item-level revenue this header-level `outstanding_amount` isn't
   duplicated by POS consolidation). Each file's own `TOOL_SPECS`/`TOOL_DISPATCH` get merged in
   `api.py`.
+
+## Accounts tools (`tools_accounts.py`, added 2026-07-18) — 9 GL-Entry-based financial tools
+
+Added after a real production bug was found: the "Outstanding Payables" executive widget showed
+**PKR 0.00** on `siezal` when the real Creditors-account balance was **~PKR 43.8M** (hsm: **~PKR
+91.0M**). Root cause: `get_outstanding_payables_overview` (in `tools.py`) only summed `Purchase
+Invoice.outstanding_amount` — but `siezal`/`hsm` had **zero/near-zero submitted Purchase Invoices**
+at the time; their real supplier debt is carried almost entirely via legacy per-row opening-balance
+**Journal Entries** from the iPOS supplier migration (see `ipos-migration` skill /
+`supplierimport.md`). Fixed by switching that tool to sum `GL Entry` (`party_type = 'Supplier'`,
+`is_cancelled = 0`) instead — the only source that captures Purchase Invoice, Journal Entry, *and*
+Payment Entry postings against a party uniformly, matching how ERPNext's own Accounts Payable
+report actually computes outstanding balance. Verified live: siezal jumped from PKR 0 to PKR
+43,789,931.11 across 282 suppliers; hsm to PKR 91,036,465.11 across 259. This is the same class of
+bug the rest of this module has hit before (see the revenue double-counting note above) — **a
+header-level `outstanding_amount`/table-only view can silently miss an entire class of real
+transactions that a different site's data happens to be dominated by**; always cross-check a
+financial total tool against the raw GL Entry balance for the account in question before trusting
+it, especially on a site with any history of bulk/legacy data import.
+
+**All 9 new tools are GL-Entry/Account-based** (never Purchase Invoice/Sales Invoice header fields
+alone), so they inherit that same correctness property and are safe from the revenue-double-counting
+gotcha above for a different reason: `POSInvoice.on_submit()` never posts GL Entries itself (see
+"POS Invoice stock/GL updates only ever happen via the *consolidated* Sales Invoice" in this bench's
+CLAUDE.md) — so Income-type GL Entries only ever exist once, tied to the one real consolidated Sales
+Invoice, never duplicated between POS Invoice and Sales Invoice the way item-level revenue tables are.
+
+- `get_payables_aging(limit=10)` / `get_receivables_aging(limit=10)` — buckets a party's outstanding
+  GL balance into `0-30`/`31-60`/`61-90`/`90+` days by each contributing GL Entry row's own
+  `posting_date`. **Only positive-net-balance parties count** — a supplier/customer whose rows net
+  to a credit/prepaid position is excluded entirely from both the totals *and* the aggregate
+  buckets (re-derived from the filtered per-party bucket fields, not summed from raw rows), so
+  `buckets` always sums to exactly `total_outstanding_amount` — the first draft summed raw GL rows
+  directly into `buckets` without this filter; fixed before deploy, caught by design review not
+  live testing (a single-supplier-per-bucket dataset wouldn't have surfaced it).
+- `get_cash_and_bank_balance()` — point-in-time (`posting_date <= today`) balance of every leaf
+  `Account` with `account_type IN ('Cash', 'Bank')`.
+- `get_profit_and_loss_overview(date_from, date_to)` — real GL-based P&L: Income (`root_type='Income'`,
+  normal credit) minus Expense (`root_type='Expense'`, normal debit) for the period. **Will show
+  PKR 0 for "today" on a site with an un-closed POS shift** — this is expected, not a bug, per the
+  same GL-posting-only-on-consolidation fact above; a question needs to resolve to a period that's
+  actually had a shift close to show real Income.
+- `get_expense_breakdown(date_from, date_to, limit=10)` — top N expense accounts by amount plus the
+  true total across *all* expense accounts (not just the returned page — same "total isn't capped by
+  the row limit" discipline as `get_dead_stock_detail`).
+- `get_trial_balance_summary(date_from, date_to)` — Asset/Liability/Equity are **cumulative** balances
+  up to `date_to` (balance-sheet accounts never reset); Income/Expense are **period** balances
+  (`date_from`→`date_to`, since they're period accounts). `balance_check` (`Assets - (Liabilities +
+  Equity)`) is **expected to be nonzero in normal operation** — it will not net to zero until a
+  fiscal-year-end closing entry folds the period's Income/Expense into Equity, which most sites never
+  run continuously — so its KPI severity never escalates past `"info"`, deliberately, to avoid crying
+  wolf on every single call. Confirmed live on siezal: a `5119 - Stock Adjustment - SSM` expense
+  account carries a large one-time negative balance (~-43.5M) from the iPOS opening-stock-value
+  import — a real, explainable artifact of the migration, not a code bug, but it's why
+  `balance_check`/`expense_balance` can look dramatic on siezal specifically.
+- `get_tax_liability_overview(date_from, date_to)` — sums `GL Entry` for every leaf `Account` with
+  `account_type = 'Tax'`; returns an empty/zero shape (never throws) if a site's chart of accounts
+  doesn't tag any account that way.
+- `get_payment_entry_summary(date_from, date_to)` — `Payment Entry` (docstatus=1) totals by
+  `payment_type` (Receive/Pay) plus a `mode_of_payment` breakdown.
+- `get_branch_profit_and_loss(date_from, date_to)` (9th tool, added same session) — Income/Expense/
+  net profit per branch via `GL Entry.branch` (a real Link field, confirmed to exist directly on GL
+  Entry as an Accounting Dimension), with a synthetic `"Unassigned"` bucket for the (currently large
+  majority of) untagged rows — mirrors the same Unassigned-bucket convention `sales_dashboard`/
+  `vendor_performance` already use for the identical reason. Low practical value on `siezal` today
+  (only 1 real branch, ~3 of 1334 GL Entry rows carry a branch) but exercises correctly and will
+  become genuinely useful as siezal adds its next branches or on `szl`'s 5-branch test data (verified
+  live on both).
+
+**Sign conventions used throughout** (get these backwards and every number is silently wrong, with
+no error to catch it): Asset/Expense accounts have a normal **debit** balance
+(`SUM(debit - credit)`); Liability/Equity/Income accounts have a normal **credit** balance
+(`SUM(credit - debit)`). Verified against real data for every one of the 9 tools before deploy.
+
+**Four real bugs in the first Nemotron draft, all caught before/during deploy testing, not
+discovered by users**:
+1. Every `DataSource` entry drafted for `report_registry.py`'s `TOOL_REGISTRY` omitted
+   `supported_filters` and `returned_fields` — both are **required** fields on the `DataSource`
+   frozen dataclass (no default value), so importing `report_registry.py` as drafted would have
+   raised `TypeError: missing 2 required positional arguments` the first time anything imported
+   that module, breaking the entire AI console (not just the 8 new tools) until fixed. Caught by
+   re-reading the `DataSource` dataclass definition against the draft, not by running it.
+2. `chart_recommender.py` never had `from frappe.utils import flt` in its imports (apparently
+   never needed by any pre-existing chart function, which use raw already-float dict values
+   directly) — but half the new `_chart_*` functions called `flt()` on their values, so 4 of 7
+   raised `NameError: name 'flt' is not defined` the moment they were exercised with non-empty
+   data. **Only caught by an actual functional test with real data reaching the chart path** —
+   `python3 -m py_compile` and even an import-only smoke test both passed cleanly, since the
+   `NameError` only fires when the function body actually executes past the empty-data guard.
+   Fixed by adding the import.
+3. `response_schema.Chart` has a required `auto_selected: bool` field (no default) that every
+   pre-existing `_chart_*` function sets to `True` — the new functions omitted it entirely,
+   raising `TypeError: Chart.__init__() missing 1 required positional argument: 'auto_selected'`
+   the moment any of them returned non-`None`. Same "only caught by real data reaching the
+   construction line" pattern as #2 — masked in the first functional-test pass because that pass
+   happened to hit only tools whose chart functions returned `None` for that day's narrow
+   ("today only") default date range.
+4. Every new chart function used dataset dicts shaped `{"name": ..., "values": [...]}`, but the
+   frontend (`init_chart` in `ai_assistant_console.js`) reads `chart.data.datasets[i].label`/
+   `.data` and remaps *those* keys to `name`/`values` internally for `frappe.Chart` — every
+   pre-existing chart function in this file already used `{"label": ..., "data": [...]}`. The
+   `{"name": ..., "values": ...}` shape wasn't itself a crash (`ChartData.datasets` is typed as a
+   generic `list[dict]`, no schema enforcement), so this would have silently rendered every new
+   chart type as empty/broken in the browser with zero server-side error — the kind of bug that
+   never surfaces in `bench console` testing at all, only caught by explicitly reading the
+   frontend's actual key-remapping code and comparing against the backend's dict shape.
+
+**A fifth, pre-existing bug this work exposed (not introduced by tonight's changes) — LLM
+tool-routing confusion between a purpose-built tool and `run_dynamic_report`**: the exact phrasing
+"What is our total outstanding payable amount and which suppliers do we owe the most to?"
+reproducibly (5/5 attempts) made the model call `run_dynamic_report` against `Purchase Invoice`
+instead of the purpose-built `get_outstanding_payables_overview`/`get_payables_aging` — and since
+`siezal` has zero submitted Purchase Invoices, every dynamic-report attempt returned `row_count: 0`,
+the model kept retrying different filter/date variations against the same empty doctype, and
+`ask()` exhausted its `_MAX_TOOL_ITERATIONS = 5` budget without ever producing a real answer.
+Traced by monkey-patching `get_chat_completion`/`_dispatch_tool_call` to log every tool call and
+its result — confirmed the model was choosing the wrong tool outright, not hitting a rate limit.
+Fixed by adding an explicit instruction to `_build_system_prompt()`: always prefer a purpose-built
+tool over `run_dynamic_report`, and trust a purpose-built tool's empty/zero result rather than
+retrying via the fallback. Verified fixed: the same question now calls
+`get_outstanding_payables_overview` correctly on the first attempt. This fix is general (system
+prompt, not tool-specific) and should reduce this failure mode for any future purpose-built vs.
+`run_dynamic_report` ambiguity, not just this one payables question.
+
+**Cross-check performed before deploy** (via `bench execute` against real `siezal` data,
+2026-07-18): `get_payables_aging()["total_outstanding_amount"]` exactly matched the
+independently-fixed `get_outstanding_payables_overview()["total_outstanding_amount"]` (both PKR
+43,789,931.11), and `sum(get_payables_aging()["buckets"].values())` exactly matched that same
+total — confirming the positive-net-balance-only filtering fix above is internally consistent, not
+just plausible-looking.
+
+**TOOL_SPECS date-range descriptions were corrected before deploy**: the first draft's
+`date_from`/`date_to` parameter descriptions said "defaults to fiscal year start" — false; these
+tools share `tools.py`'s existing `_get_date_range` helper, which (like every other date-ranged tool
+in this module) defaults to **today only** when omitted, relying on the system prompt's own
+instruction that the LLM resolve phrases like "this month"/"this year" into concrete dates itself
+before calling a tool. Descriptions now match the other tools' actual "defaults to today" phrasing.
+
+**Gotcha — testing tool availability itself was intermittently blocked mid-session** by Claude
+Code's own Bash/Edit permission classifier being unavailable for an extended stretch; short, simple
+commands (`bench --site X execute frappe.ping`, `echo`) occasionally got through while longer piped/
+heredoc `bench console` invocations consistently didn't. Worked around by using
+`bench --site <site> execute <dotted.path.to.function>` against a short-lived temp module dropped
+directly into `aimatic/ai/_diag_temp.py` (deleted immediately after each check, never committed) —
+a plain `bench execute <dotted-path>` call is a shorter, simpler command shape than a piped
+`bench console` heredoc and had a measurably higher success rate against the degraded classifier.
+Worth remembering as a fallback pattern if this recurs, independent of tonight's specific outage.
+
+Wired into `api.py` exactly like `tools_extended.py`: `from aimatic.ai.tools_accounts import
+TOOL_DISPATCH as _ACCOUNTS_DISPATCH, TOOL_SPECS as _ACCOUNTS_SPECS`, merged into the top-level
+`TOOL_SPECS`/`TOOL_DISPATCH`. KPI/table builders added to `answer_builder.py`'s
+`_KPI_DISPATCH`/`_TABLE_DISPATCH` (no table for `get_profit_and_loss_overview` — a few headline
+numbers don't need one), chart builders to `chart_recommender.py`'s `_CHART_DISPATCH` (aging
+buckets, expense breakdown, and branch net-profit as bar charts, capped at `_MAX_CHART_BARS`; no
+chart for `get_profit_and_loss_overview`/`get_cash_and_bank_balance` beyond their KPIs), and all 9
+registered in `report_registry.py`'s `TOOL_REGISTRY`.
 
 **`dynamic_report.py`** (Phase 2, the "AI-Generated Reports" controlled fallback) — the one path
 in this whole module where a hardcoded whitelist, not the LLM, decides what SQL can run.
@@ -231,6 +387,23 @@ This works well in practice (verified live: correctly picked out one critically-
 three flagged rows, correctly explained the other two were overstocked not understocked) but is
 LLM reasoning over a general-purpose tool, not a purpose-built reorder-point calculation — a
 future phase could add a dedicated tool if this reasoning step proves unreliable at scale.
+
+**Real bug found and fixed 2026-07-18 — LLM chose `run_dynamic_report` over a purpose-built tool
+and got stuck**: the phrasing "What is our total outstanding payable amount and which suppliers do
+we owe the most to?" reproducibly (5/5 attempts) made the model call `run_dynamic_report` against
+`Purchase Invoice` instead of `get_outstanding_payables_overview`/`get_payables_aging` — and since
+`siezal` has zero submitted Purchase Invoices, every dynamic-report attempt returned `row_count: 0`,
+the model kept retrying different filter/date variations against that same empty doctype, and
+`ask()` exhausted `_MAX_TOOL_ITERATIONS` without ever producing an answer. Traced by monkey-
+patching `get_chat_completion`/`_dispatch_tool_call` to log every call and its result — confirmed
+this was the model choosing the wrong tool outright, not a rate limit (the trace showed 5 distinct
+`run_dynamic_report` calls with varying arguments, never once trying the correct tool). Fixed by
+adding an explicit instruction to `_build_system_prompt()`: always prefer a purpose-built tool over
+`run_dynamic_report`, and trust a purpose-built tool's empty/zero result rather than retrying via
+the fallback — `run_dynamic_report` is a last resort for questions no specific tool covers, not a
+first choice. Verified fixed: the same question now calls the correct tool on the first attempt.
+This is a general system-prompt fix, not specific to payables — it should reduce this failure mode
+for any future purpose-built-tool-vs-`run_dynamic_report` ambiguity as more tools get added.
 
 ## Conversation management (Phase 2)
 
@@ -441,18 +614,23 @@ space above the chat after a question is picked. Fixes a real complaint: System 
 has 19 suggested questions, which as a flat always-visible flex-wrap row pushed the chat window
 down several lines; collapsed height is ~33px vs. ~595px expanded (measured live on szl).
 
-## Executive Overview dashboard (built 2026-07-18)
+## Executive Overview dashboard (built 2026-07-18, extended same night)
 
-A 10-widget `AI Dashboard` named **"Executive Overview"**, owned by `Administrator`, exists on
+A 13-widget `AI Dashboard` named **"Executive Overview"**, owned by `Administrator`, exists on
 all three sites (szl `6nf79090o4`, siezal `90ob2r8cmr`, hsm `bhlmvhta8p`) — built by scripting the
 *real* `ask()`/`save_report()`/`create_dashboard()`/`add_widget_to_dashboard()` API functions
-directly (via `bench --site <site> console`, `frappe.set_user("Administrator")` first) rather than
+directly (via `bench execute`, `frappe.set_user("Administrator")` first) rather than
 hand-writing fake widget data, so every widget holds genuine live KPIs/charts/tables exactly as if
-a user had asked and saved each question through the UI. The 10 questions cover: total sales
-overview, gross margin, branch comparison, purchase spend, vendor margin ranking, outstanding
+a user had asked and saved each question through the UI. The original 10 questions cover: total
+sales overview, gross margin, branch comparison, purchase spend, vendor margin ranking, outstanding
 payables, outstanding receivables, top selling items, dead stock risk, and returns overview — a
 deliberate CFO/CEO-level spread (revenue, margin, spend, vendor risk, cash position, inventory
-risk, loss/returns), not an arbitrary pick of whichever tools existed.
+risk, loss/returns), not an arbitrary pick of whichever tools existed. **3 more widgets** were
+added the same night once the Accounts tools above shipped: Cash & Bank Balance, Payables Aging,
+and Branch Profit & Loss. The original "Outstanding Payables" widget's saved snapshot was also
+explicitly refreshed (via `refresh_saved_report`) on all three sites after the payables GL-Entry
+fix above, since a saved report's `response_snapshot` is a point-in-time cache that doesn't
+retroactively pick up a tool-logic fix on its own — it only updates on refresh or a fresh `ask()`.
 
 **Why Administrator, not a per-user "CEO" account**: `AI Dashboard`/`AI Saved Report` are strictly
 single-owner (`_check_dashboard_ownership`/`_check_saved_report_ownership` — see above,

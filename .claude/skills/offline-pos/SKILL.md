@@ -177,31 +177,76 @@ target doctype already has a `Custom DocPerm` grant for `POS User`/`POS Supervis
 not, either add one (extend the fixture filter + create the grant on every site) or, better,
 route the read through a new whitelisted `offline_pos.api` method instead (see below).
 
-### Suggested follow-up, not yet done: stop widening raw doctype permissions
+## Follow-up done same day: whitelisted RPC endpoints replace the raw REST reads
 
-The `Custom DocPerm` approach fixes the bug with minimal code (pure data/fixture change, no
-client release needed) and is consistent with the existing POS Opening/Closing Entry precedent,
-but it has a real downside worth flagging: it's the *opposite* of core ERPNext's own POS
-security model (RPC-mediated, `ignore_permissions`-scoped reads) — every doctype granted here is
-now readable by `POS User`/`POS Supervisor` from *anywhere* in Desk, not just through the
-terminal, and a future admin looking at the Role Permission Manager has no obvious signal these
-grants exist specifically to keep POS terminals working (unlike a whitelisted Python method,
-which is self-documenting and reviewable in one file). A more robust design, mirroring how
-`get_item_barcodes`/`get_uom_conversions` already work: add purpose-built whitelisted
-`offline_pos.api` endpoints (e.g. `get_pos_profile_bootstrap`, `get_master_data_lookup`) that
-read with `ignore_permissions=True` internally, scoped to exactly the fields the terminal needs,
-and migrate the Electron client's `fetchErpResource`/`fetchPagedList` call sites onto them one at
-a time. That would let `POS User`/`POS Supervisor`'s *generic* Desk permissions stay minimal
-again, with the terminal's actual data needs centralized and auditable in this one file instead
-of scattered across doctype-level Role Permission Manager entries. Not done as part of this fix —
-would require a Posapplication client release, more risk for the same immediate outcome — but
-worth doing if this doctype list keeps growing.
+The `Custom DocPerm` widening above fixed the bug fast (pure data/fixture change, no client
+release), but it's the *opposite* of core ERPNext's own POS security model (RPC-mediated,
+`ignore_permissions`-scoped reads) — every doctype granted there became readable by `POS
+User`/`POS Supervisor` from *anywhere* in Desk, not just through the terminal, with no signal in
+the Role Permission Manager that the grant exists specifically to keep POS terminals working.
+Built the more robust replacement the same day, mirroring `get_item_barcodes`/
+`get_uom_conversions`:
 
-A second, cheaper follow-up: add a whitelisted `offline_pos.api.diagnose_terminal_permissions()`
-that a supervisor could call from the Settings screen to get a structured pass/fail list against
-exactly this doctype matrix, instead of the generic "POS Profile load failed" error the client
-currently shows — would have surfaced this bug immediately as "POS Profile: FAIL, Customer: FAIL"
-rather than requiring trial-and-error role assignment to diagnose.
+**`aimatic.offline_pos.api`** gained four new whitelisted endpoints, gated by an explicit
+`_TERMINAL_MASTER_DATA_DOCTYPES` allowlist constant (the same 13 doctypes from the table above)
+plus `_require_login()` — no role check beyond being logged in, matching the existing
+`get_item_barcodes`/`get_uom_conversions` convention (the terminal's own authenticated identity
+is the gate, not a specific role):
+
+- `get_terminal_resource(doctype, name)` — single-document read, `frappe.get_doc(doctype,
+  name).as_dict()`. Replaces `GET /api/resource/<doctype>/<name>`.
+- `list_terminal_resources(doctype, fields, filters, limit_start, limit_page_length)` — paged
+  list read, `frappe.get_list(..., ignore_permissions=True)`. Replaces `GET
+  /api/resource/<doctype>?fields=...`.
+- `create_walkin_customer(customer_name, customer_group, territory, mobile_no, email_id,
+  tax_id, default_price_list)` — replaces `POST /api/resource/Customer`. Duplicate-mobile
+  rejection still comes from `customer_validation.py`'s `Customer.validate` hook, not
+  reimplemented here.
+- `diagnose_terminal_permissions()` — structured `{results: {doctype: bool}, failures: [...],
+  all_ok: bool}` against `frappe.has_permission` (the raw-REST-relevant check, so it still
+  reflects reality for a terminal on an older client build that hits `/api/resource` directly).
+  Not yet wired into the Settings screen UI — callable today via `bench execute`/direct HTTP for
+  diagnosis, a UI button is a future addition if this class of bug recurs.
+
+**`Posapplication` v2.7.7** (`~/Posapplication`, pushed to `main` 2026-07-19 — a real release,
+see the `posapplication-release` skill) migrated onto these: `core/http.ts`'s
+`fetchErpResource`/`fetchPagedList` now call `get_terminal_resource`/`list_terminal_resources`
+instead of building `/api/resource/<doctype>` URLs directly. Because those two functions are the
+**shared** low-level helpers, every existing caller (`syncPosConfiguration`, `syncCustomers`,
+`loadCustomer`, `getCustomerCreationOptions`, `validateCoupon`, the Item/Item Price/Bin catalog
+sync) needed *zero* changes — only `http.ts` itself changed. Three call sites had hand-rolled
+their own `/api/resource` URLs instead of using the shared helpers
+(`loadAvailablePosProfiles`/`loadPosProfile` in `core/pos-config.ts`,
+`findPosInvoicePrintFormat` in `core/sale-refund.ts`) — refactored to route through
+`http.fetchPagedList`/`fetchErpResource` too, closing the gap for those three and removing the
+duplication at the same time. `createCustomer` (`core/catalog-sync.ts`) now posts to
+`create_walkin_customer` instead of raw `/api/resource/Customer`. **No changes to
+`renderer.ts`/`preload.ts`/`api/client.ts`** — every exported `core/*.ts` function kept its exact
+prior signature and return shape, which is what kept this a low-risk, single-day, same-session
+fix instead of a multi-file UI refactor. (`src/api/branches.ts`/`customers.ts`/`items.ts`/
+`stock.ts`/`pricing.ts` — thin wrappers around `client.ts`'s `getResource`/`listResources`
+directly — were confirmed dead code, imported nowhere, and left untouched.)
+
+Verified before pushing: `npx tsc --noEmit` clean, full existing test suite (`npm test`, 86/86)
+still green, and — since `client.ts`'s low-level `getResource`/`listResources` URL-construction
+test doesn't exercise `http.ts`'s wrappers — a live end-to-end run of the actual compiled
+`dist/core/*.js` (not just source) against production-identical `szl`, driven by a small Node
+script (`require`-ing the compiled CommonJS output directly, real `fetch`, a minimal `db` stub)
+using a real throwaway `POS User`+`POS Supervisor`-only cashier account: `testApiAuthentication`
+→ `loadAvailablePosProfiles` → `loadPosProfile` (warehouse + terminal ID both present) →
+`syncCustomers` → `createCustomer`, all passing. This required a web worker restart first (new
+Python endpoints aren't visible to the preloaded gunicorn workers otherwise — see the
+`bench-ops` skill) since `bench execute` alone can't validate the actual HTTP wire format
+(query-string encoding, `frappe.form_dict` kwarg matching, the `{"message": ...}` response
+wrapping) the way a real request over the wire does.
+
+**The `Custom DocPerm` grants from the section above are deliberately left in place**, not
+reverted — they're now a redundant safety net for any terminal still running a client build
+older than v2.7.7 (Electron's auto-updater rolls out over time, not instantly to every device).
+Revisit removing them once the fleet is confirmed on v2.7.7+ — not done blindly in the same
+session as shipping the client that supersedes them, since that would leave zero fallback for a
+terminal that hasn't updated yet. Check `gh release list --repo BeelBegins/Posapplication` /
+actual deployed-terminal versions before considering that cleanup.
 
 Update the `offline_pos` section of the top-level `CLAUDE.md` in the same session if endpoints,
 the auth flow, or the stock/GL consolidation behavior changes.

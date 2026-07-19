@@ -661,6 +661,364 @@ siezal and hsm each hit exactly 2 of these transient failures; a short (15-20s) 
 just the failed question(s) — re-running `ask()`, `save_report()`, `add_widget_to_dashboard()` for
 those alone against the same already-created dashboard — succeeded every time on the next attempt.
 
+## Data-leakage fix + conversation-history optimization (2026-07-18, drafted by Nemotron, reviewed/corrected/applied by Claude)
+
+Real bug found by manual audit, not live testing: **`Scheduled Question.recipients` /
+`AI Alert Rule.recipients` were plain free-text `Text` fields with zero validation** in
+`create_scheduled_question`/`update_scheduled_question`/`create_alert_rule`/`update_alert_rule`.
+Any user holding one of the 4 `_ALLOWED_ROLES` could point either doctype's `recipients` at an
+arbitrary external email address, and `tasks.py`'s daily `run_scheduled_questions`/
+`check_alert_rules` would then automatically email confidential business data (payables, margins,
+vendor performance, sales) to it forever, unattended, with no guardrail and no audit trail beyond
+`frappe.log_error` on failure. Fixed with a new `_validate_recipients(recipients: str) -> str`
+helper in `api.py`, called from all 4 write paths: every recipient must resolve to an existing,
+**enabled** Frappe `User` who **already holds one of `_ALLOWED_ROLES`** — not just any registered
+account. This second condition is deliberately stricter than "any enabled User": ERPNext routinely
+auto-creates User records for Customer/Supplier portal contacts, and without the role check a
+Scheduled Question could still legally forward confidential financial data to one of those
+low-privilege accounts. Rejects the whole save (lists every invalid recipient) rather than
+silently dropping bad entries; caps at `_MAX_RECIPIENTS = 20`; dedupes case-insensitively.
+
+Second real issue found the same way: `get_conversation_messages` had no `limit` at all — an
+unbounded query plus a single-shot unbounded DOM append in `ai_assistant_console.js`'s
+`open_conversation` for any conversation regardless of length. Fixed with cursor-based pagination:
+`get_conversation_messages(conversation, limit=100, before=None)` returns the most recent `limit`
+messages (capped at 200) in ascending order plus `has_more`; `before` is a message's own
+`creation` timestamp, used to page further back. Verified live against a real 12-message szl
+conversation with `limit=5`: page 1 returns the 5 newest messages ascending with `has_more=true`;
+paging with `before` set to the oldest loaded message's `creation` correctly returns the next
+older batch; a third page correctly returns the final 2 with `has_more=false`.
+
+Two more N+1 queries fixed the same session (spotted in the same audit, not user-reported):
+`list_dashboards` was doing one `frappe.db.count` per dashboard row instead of one grouped SQL
+query; `get_dashboard` was doing one `frappe.get_doc("AI Saved Report", ...)` per widget instead
+of one batched `frappe.get_all(..., filters={"name": ["in", ...]})`. Both verified live against
+the real "Executive Overview" dashboard on szl (13 widgets, all titles/order correct after the
+fix).
+
+**Working-pattern note, same as every phase above**: Nemotron's first draft (via `ask-nemotron`,
+piped the relevant code as stdin context) got the overall shape right for all four fixes but had
+two real bugs that a Claude review pass caught before anything was applied — worth recording
+because it's the same "draft, then verify" pattern that's held for every phase, not a one-off:
+1. **The recipient-validation draft only checked "is an enabled Frappe User exists"**, not that the
+   user holds an allowed role — the portal-account gap described above. Caught by re-reading the
+   draft against the actual leak being fixed (forwarding confidential data), not by running it.
+2. **The pagination JS draft called `.prepend()` once per message inside a `forEach` loop** to
+   insert an older page above the existing bubbles. Since `.prepend()` always inserts at the very
+   start of the container, looping it over an already-ascending-order batch silently **reverses**
+   that batch's visual order (first message prepended ends up last, not first) — this would have
+   applied to the very first page load too (no `.prepend()`/`.append()` branch existed), so every
+   conversation would have opened with its messages in reverse chronological order, a bug visible
+   the instant any 2+ message conversation was opened. Fixed by building each page's bubbles into
+   a plain array first (`messages.map(...)`) and inserting the whole array in one `.append()`/
+   `.prepend()` call — jQuery preserves array order on insertion, so one call is both correct and
+   the same story either direction (append for the first/newest page, prepend for an older page).
+   The draft also invented a new `_render_bubble`/`ai-bubble` CSS class instead of reusing the
+   file's real `append_bubble` markup (`.ai-assistant-bubble`/`.ai-assistant-bubble-${role}`) —
+   would have rendered unstyled/invisible bubbles for every paginated message. Fixed by extracting
+   the existing bubble-building code out of `append_bubble` into a reusable `build_bubble(role,
+   content, is_error)` that both the normal send path and the pagination path now share, so there
+   is only one place bubble markup is defined.
+
+Nemotron's draft also floated a 3rd, unrequested "hardening" idea (per-rule email-failure counters
++ auto-disable after N failures, requiring new doctype fields via patch) — deliberately **not**
+implemented: it wasn't part of the two confirmed issues being fixed, needs a schema migration
+decision, and the session doing this fix had no user available to weigh in on it. Worth revisiting
+as a real follow-up if `Scheduled Question`/`AI Alert Rule` failures turn out to be a recurring
+operational problem in practice.
+
+**Deployment note**: all four fixes are Python (`api.py`) + one JS file — the JS change needed
+`bench build --app aimatic` (done), and the Python change needs the usual gunicorn worker restart
+per the "Deployment gotcha" note above (`sudo supervisorctl restart frappe-bench-frappe-web`) —
+**not yet done as of this write-up**, since the sandboxed session that made this change has no
+passwordless sudo (same limitation as the nginx-reload gotcha in this bench's CLAUDE.md); a human
+needs to run that restart before these fixes are live for real requests, even though `bench
+execute` calls during review already exercised the new code against real szl data successfully
+(that path uses a fresh process per invocation, so it doesn't need the running workers reloaded).
+
+## AI Dashboard widgets showing incomplete data (2026-07-19) — a third free-tier tool-calling failure mode
+
+User-reported on siezal: several Executive Overview widgets showed no KPI cards/charts and only a
+wall of text or nothing at all. Root cause was **not** the batched-fetch changes from the section
+above (verified: `get_dashboard`/`list_dashboards` return all 13 widgets, correctly ordered, on
+both szl and siezal) - it was that some widgets' saved `response_snapshot` had genuinely been
+captured incomplete at build time, and the live `ask()` pipeline could **reproduce the same
+incompleteness on demand**, which is what actually made it worth calling a code bug rather than
+just stale caching.
+
+**Two new free-tier tool-calling failure modes, distinct from the malformed-tool-call-JSON one
+documented earlier**, both confirmed live and both leaving `tool_results` empty (so
+`answer_builder.build_response` has nothing to build KPIs/charts/tables from, and the answer ships
+as plain unstructured text):
+1. **Fake tool hallucination** - asking "What is our current cash and bank balance?" (answered
+   directly by the real `get_cash_and_bank_balance` tool) reproducibly (2/2 attempts) returned a
+   reply that never called any tool and instead listed dozens of repetitions of
+   `get_branch_stock_valuation_summary_comparison` - a tool name that has never existed anywhere
+   in this codebase - while stating "I don't see a direct ... tool."
+2. **Real-tool narration without ever calling one** - asking "What are our overdue payables broken
+   down by aging bucket?" (answered directly by the real `get_payables_aging` tool) returned
+   several paragraphs of visible chain-of-thought correctly *naming* several real tools (including
+   `get_payables_aging` itself) while reasoning about which one might work, without ever issuing an
+   actual tool call.
+
+**Fix, `api.py`**: a new `_looks_like_tool_hallucination(content, tool_results)` (paired with the
+existing `_looks_like_raw_tool_json`, same corrective-retry mechanism - appends a nudge message and
+`continue`s within the existing `_MAX_TOOL_ITERATIONS` budget rather than accepting the reply).
+Deliberately broad: fires on **any** `get_`/`rank_`/`run_`-shaped identifier appearing in the reply
+while `tool_results` is still empty, not just ones absent from `TOOL_DISPATCH` - narrowing to
+"unknown names only" would have caught failure mode 1 but missed failure mode 2, since case 2
+correctly names real tools. A genuine natural-language answer never has a reason to spell out its
+own snake_case tool identifier verbatim (it says "cash balance", not "get_cash_and_bank_balance"),
+so this is safe even though it's broad - verified against a real successful answer (Cash & Bank
+Balance's fixed rerun) to confirm it does **not** misfire on legitimate text. `_build_system_prompt`
+also gained an explicit instruction not to narrate tool availability in plain text and to always
+attempt a real function call, plus `rank_vendors`/`get_cash_and_bank_balance`/
+`get_branch_profit_and_loss` added to the "prefer a purpose-built tool" example list (the existing
+instruction already said this generically, but the model wasn't generalizing it past the 3 tools
+originally named as examples - same "add the specific example" fix pattern already used for the
+payables-vs-`run_dynamic_report` bug documented above).
+
+**Verified live on siezal** (via `bench execute`, which loads current code fresh - no worker
+restart needed for this verification step, only for real end-user requests): the exact captured
+failure-mode-1 and failure-mode-2 text both correctly trip the new detector when replayed offline;
+a live rerun of the cash-and-bank-balance question after the fix returned a full
+kpi/chart/table/sources answer; `refresh_saved_report` then correctly recaptured both the "Cash &
+Bank Balance" and "Payables Aging" saved reports with complete kpis/charts/tables.
+
+**Known remaining gap, not fully fixed**: "Vendor Margin Ranking" (`rank_vendors`, question "Which
+vendors have the best and worst gross margins for us?") is more stubborn - two refresh attempts
+after the fix both hit `_MAX_TOOL_ITERATIONS` exhaustion (the hallucination guard correctly kept
+rejecting non-answers, but the model never recovered with a real tool call within the 5-iteration
+budget either time). This is arguably a *better* failure than before (a loud `ValidationError`
+instead of a silently-incomplete answer) but the widget itself is still not fully fixed - its saved
+snapshot was left at its last successful state (a `run_dynamic_report`-sourced table, no
+kpis/chart, from before this session's fix) rather than corrupted by the failed attempts, since
+`ask()` throws before `refresh_saved_report` ever calls `doc.save()`. Worth retrying this specific
+question again later (nondeterministic free-tier flakiness) or investigating further if it keeps
+failing - not chased further in this session to avoid burning more of the shared daily/concurrency
+OpenRouter quota (see "Nemotron client and model config" above) on one stubborn case.
+
+**Only the 3 widgets confirmed broken/incomplete were refreshed this session** (Cash & Bank
+Balance, Payables Aging, Vendor Margin Ranking, all on siezal) - the other 10 siezal widgets and
+all 13 szl widgets were left untouched: their kpi/chart/table counts were checked and found
+consistent with each tool's actual by-design output shape (e.g. `get_sales_overview` genuinely has
+no table/chart, `get_branch_comparison` genuinely has no KPI), not evidence of the same
+incompleteness bug. Re-run the same per-widget `kpis: len(...)/charts: len(...)/tables: len(...)`
+check via `get_dashboard` before assuming any other widget needs a refresh - most zero counts on
+this dashboard are correct, not broken.
+
+**Deployment note**: same as the section above - this is another `api.py`-only change, still
+needs `sudo supervisorctl restart frappe-bench-frappe-web` (not done by this session, no
+passwordless sudo available) before it protects real end-user chat requests through the live site;
+only `bench execute`-based verification calls (fresh process per invocation) already exercised the
+fix.
+
+## More incomplete widgets found after the restart (2026-07-19, same day) — a same-tool-name overwrite bug, a stale outstanding-payable bug in a second tool, and a fourth free-tier failure mode
+
+After the restart above, user re-reported (on siezal) that "outstanding net sales purchases" were
+*still* empty - specifically "Total Sales Overview" and "Purchase Spend Overview". These turned out
+to be two genuinely different, previously-undiscovered bugs, neither related to the hallucination
+guard above:
+
+1. **`tool_results` dict keyed by tool name silently drops comparison-period data.** `ask()`'s
+   tool-call loop (`api.py`) did `tool_results[name] = result` unconditionally on every call. A
+   comparison-style question ("this month vs last month") makes the model call the same tool
+   (`get_sales_overview`) twice with different date ranges - the second call's result **overwrote**
+   the first in the dict, and `build_response()` only ever sees the survivor. Concretely: "Total
+   Sales Overview" (question: "...this month compared to last month?") had a narrative summary
+   correctly saying "Net Sales PKR 153,728" (this month) but its structured `kpis` array showed
+   `0.0` for every metric, because the second (last-month, genuinely-zero) call clobbered the first.
+   The LLM's own prose stayed correct throughout (it saw both tool results in-context while
+   composing text) - only the structured KPI/chart/table extraction was affected, which is why this
+   sat undetected through the earlier hallucination-focused investigation (that one specifically
+   looked for `tool_results` being *empty*, not present-but-wrong).
+   **Fix**: keep the FIRST call's result per tool name (`if ... and name not in tool_results:`) -
+   the first call matches the period the question actually asked about; later same-tool calls are
+   supplementary context for the model's own narrative only, matching how `context.comparison_period`
+   is already documented as unsupported in Phase 1 (`build_response`'s own comment). Verified live:
+   `get_sales_overview_net_sales` KPI went from `0.0` to the correct `156052.0` after the fix.
+2. **`get_purchase_overview` (`tools.py`) had its own separate, still-buggy `outstanding_amount`
+   calc** - the exact same class of bug already fixed once for `get_outstanding_payables_overview`
+   (see "Accounts tools" above) but never propagated to this second, independent tool that also
+   surfaces an outstanding-payable figure. It summed `Purchase Invoice.outstanding_amount` only,
+   returning PKR 0 on siezal (which has ~zero submitted Purchase Invoices; real debt is in legacy
+   Journal Entries) while the real GL-based balance is PKR 43.8M. **Fix**: same GL Entry
+   (`party_type='Supplier', is_cancelled=0`), same per-party `HAVING SUM(credit-debit) > 0` positive-
+   balance-only filter (so a supplier in net credit/prepaid position doesn't drag the total down),
+   scoped by the tool's existing `branch`/`supplier` params via GL Entry's own `branch`/`party`
+   columns. **Lesson**: a fix to one tool computing a given business figure does not fix every tool
+   that independently computes the same figure - grep for other occurrences of the same raw
+   `SUM(outstanding_amount)`/`Purchase Invoice`-only pattern before considering a "total outstanding
+   payable" class of bug closed. Also added `get_purchase_overview`/`get_receivables_overview` to
+   `_build_system_prompt`'s named "prefer a purpose-built tool" example list - the generic instruction
+   alone wasn't enough to stop the model routing "What are our total purchases this month?" to
+   `run_dynamic_report` against (the empty-on-siezal) `Purchase Invoice` instead, same failure
+   pattern as the payables-vs-`run_dynamic_report` bug documented earlier in this file, just for a
+   different tool/phrasing.
+3. **A fourth free-tier failure mode: a completely empty reply, no tool call, no tool-shaped text
+   at all.** Refreshing "Outstanding Receivables" hit a case the existing two guards structurally
+   cannot catch - the model returned `content: ""` with no `tool_calls`. `_looks_like_raw_tool_json`
+   requires JSON-shaped text; `_looks_like_tool_hallucination` requires a `get_`/`rank_`/`run_`-shaped
+   identifier in the text - an empty string matches neither, so `ask()` treated it as a valid final
+   answer and returned an empty `NO_TOOL_DATA` structured response. **Fix**: a third guard,
+   `not tool_results and not reply.strip()`, added alongside the other two in the same retry loop
+   (same nudge-and-`continue` mechanism, same `_MAX_TOOL_ITERATIONS` budget).
+4. **`refresh_saved_report` saves unconditionally on any non-throwing `ask()` result - including a
+   degraded one.** This is what turned failure mode 3 into a real incident, not just a caught edge
+   case: before guard 3 existed, the first refresh attempt on "Outstanding Receivables" returned an
+   empty-but-non-throwing structured response, and `refresh_saved_report` immediately persisted it
+   with `doc.save()` - overwriting a **previously correct** snapshot (real answer: PKR 0.00,
+   legitimately zero, with a proper KPI card) with a blank one. The existing "ask() throws before
+   save() runs" protection (documented in the section above) only covers the hard-exception case
+   (`_MAX_TOOL_ITERATIONS` exhaustion); it does nothing for a non-throwing-but-empty result. **Fix**:
+   `refresh_saved_report` now compares the fresh result's kpis/charts/tables against the *existing*
+   snapshot's before saving - if the fresh result is empty on all three AND the existing snapshot had
+   real data on any of them, the degraded result is still returned to the caller (so the UI shows
+   what happened for that one refresh) but is **not** persisted, logged to Error Log instead
+   (`"AI Assistant: refresh produced no data, snapshot kept"`). A widget that already has good data
+   can no longer be silently regressed to blank by one bad free-tier response. The corrupted
+   "Outstanding Receivables" snapshot from before this fix was itself repaired by a follow-up
+   refresh (guard 3 forced a real tool call on retry) - confirmed back to the correct PKR 0.00 KPI.
+5. **`rank_vendors` (`tools.py`) was the actual root cause of "Vendor Margin Ranking" being
+   permanently broken - not LLM flakiness, as the earlier section above assumed.** Its
+   candidate-vendor query sourced *only* from `Purchase Invoice`; siezal has **zero submitted
+   Purchase Invoices** (its purchase activity is entirely in Purchase Receipts), so the function
+   hit its own `if not purchase_rows: return {..., "vendors": []}` guard on literally every call,
+   regardless of date range or which tool the model chose - no retry could ever have fixed this,
+   the tool was structurally guaranteed to return nothing on this site. (The earlier session's "two
+   retries both hit `_MAX_TOOL_ITERATIONS`" observation was itself a symptom: the model likely got
+   an empty `vendors: []` result back, didn't trust it per the system prompt's own "trust a
+   purpose-built tool's empty result" instruction as consistently as intended, and burned its
+   iteration budget second-guessing instead.) **Fix**: candidate suppliers are now the union of
+   Purchase Invoice AND Purchase Receipt activity in the window (Invoice figures win when a
+   supplier has both, to avoid double-counting a receipt that was later invoiced; Receipt is the
+   fallback for receipt-only suppliers) - mirrors `get_purchase_overview`'s existing two-query
+   pattern. `outstanding_amount` per vendor also switched from `Purchase Invoice.outstanding_amount`
+   to the same GL Entry-based calc as items 2 above / `get_outstanding_payables_overview` (same bug
+   class, third occurrence found - grep for other `SUM(outstanding_amount)`/Purchase-Invoice-only
+   patterns before considering this class of bug closed sitewide). Verified live: `rank_vendors`
+   with a July date range now returns real vendors (`PAKISTAN FRUIT JUICE COMPANY PVT LTD (HICO)`,
+   `AT-TAHUR LTD (PREMA)`) with correct purchase amounts and GL-based outstanding balances, where it
+   previously returned `vendors: []` unconditionally. A subsequent `refresh_saved_report` on the
+   "Vendor Margin Ranking" widget itself still hit two free-tier failures on retry (a degenerate
+   repeated-phrase text loop, then `_MAX_TOOL_ITERATIONS` exhaustion) - guard 4 above kept the
+   previously-stored snapshot intact through both, so this is now a **data-correctness fix with an
+   unresolved LLM-flakiness overlay**, not the fully-broken structural bug it was before. Worth
+   retrying the refresh later (nondeterministic) rather than assuming it's still the same bug as
+   before this fix.
+
+**Verified live on siezal, full Executive Overview dashboard re-check after all five fixes**: Total
+Sales Overview (kpis: 3, correct PKR 156,052 net sales), Purchase Spend Overview (kpis: 2, correct
+PKR 43.8M outstanding), Outstanding Receivables (kpis: 1, restored), Outstanding Payables/Cash &
+Bank/Payables Aging (unchanged, still correct from the prior fix), `rank_vendors` itself confirmed
+fixed at the tool level (widget refresh still flaky, snapshot protected either way).
+
+**Deployment note**: same as both sections above - `api.py`/`tools.py` changes, needs
+`sudo supervisorctl restart frappe-bench-frappe-web` before they protect real end-user requests
+through the live site (not run from this session).
+
+## UI/UX redesign — mobile responsiveness + panel decluttering (2026-07-19, drafted by Nemotron, reviewed/corrected/applied by Claude)
+
+User feedback verbatim: "ui of ai assistant & dashboard is dry side bars takes much analysis does
+nothing conversations tab taking extra data sources taking extra its not mobile friendly." Reading
+the pre-existing `ai_assistant_console.js`/`.css` confirmed all of it concretely: **zero `@media`
+queries anywhere** in the CSS (the 3-column flex layout with two fixed-260px side panels was
+genuinely unusable below ~900px, not just suboptimal), and the right panel ("Scope & Sources")
+mostly duplicated the context bar directly above the chat (Company/Branch/Date Range shown twice)
+while permanently reserving 260px regardless of whether it was adding anything.
+
+**Scope of the fix** (frontend-only, `ai_assistant_console.js`/`.css`, no `api.py`/Python changes):
+1. **Responsive breakpoints** - `≥1024px` desktop (unchanged 3-column layout, but see #2), tablet
+   `600-1023px` and mobile `<600px` (both side panels become fixed-position off-canvas drawers that
+   slide in over a semi-transparent backdrop, rather than being squeezed into the flex row - reuses
+   the pre-existing `.collapsed` class/toggle-button contract, `.collapsed` still means "not
+   visible", it's the CSS meaning of "visible" that changes from "a flex column" to "a drawer" at
+   these widths). Context bar's 5 fields collapse behind a "Show Scope"/"Hide Scope" toggle button
+   below 1024px. Touch targets ≥40px, wider message bubbles, single-column dashboard widgets/KPI
+   grid below 600px.
+2. **Both panels now default to collapsed** on desktop too (not just mobile) so the chat gets full
+   width by default, with the collapsed/expanded choice persisted per-panel to `localStorage`
+   (`ai_assistant_left_collapsed`/`ai_assistant_right_collapsed`) so a manual toggle survives a page
+   reload instead of resetting every visit - directly answers "takes much [space]... does nothing".
+3. **Right panel trimmed** to only "Data Freshness" + "Data Sources" (`update_right_panel`) -
+   Company/Branch/Date Range removed since they're already live in the context bar.
+4. **Left sidebar conversation rows** gained a relative-time subtitle (`relative_time()`, e.g. "2h
+   ago") under the title, sourced from `last_activity` - a field `list_conversations` already
+   returned but the JS previously ignored entirely, so this is a pure frontend change with no
+   backend involvement.
+5. Selecting a conversation/dashboard/starting a new analysis now auto-closes an open drawer on
+   tablet/mobile (`close_drawers_if_mobile()`) - a gap in Nemotron's own plan, added directly by
+   Claude since a drawer pattern that never closes itself after a selection is not actually usable
+   on a phone.
+
+**Bugs found in Nemotron's draft before applying (8 total)** - same established pattern as every
+other Nemotron-drafted change in this module (see "Working pattern" above): a review pass caught
+real, concrete bugs, not just style nits.
+- **Dead/broken DOM-wrapping code**: the draft's `build_layout()` used jQuery `.wrapAll()` to wrap
+  the sidebar+rail (and right-panel+rail) into new `.ai-assistant-sidebar-wrap`/`.ai-assistant-
+  right-wrap` divs so a shared backdrop element could sit alongside them - but the CSS draft never
+  styled those two new wrapper classes at all (confirmed via a selector diff between old/new CSS).
+  Since the wrapper divs would default to block layout while their children keep flex-item CSS
+  properties that only apply inside a flex *parent*, this would have broken the desktop 3-column
+  layout entirely (sidebar-rail and sidebar stacking vertically instead of side-by-side). Fixed by
+  dropping the wrapping entirely - the backdrop is `position:fixed`, which CSS Flexbox already
+  excludes from a flex container's item layout regardless of DOM nesting, so it can just be a plain
+  sibling appended directly to `.ai-assistant-layout` with zero extra markup.
+- **Duplicate event binding**: the draft's revised constructor called `this.build_sidebar_events()`
+  a second time, not realizing `build_layout()` already calls it internally (unchanged from before
+  this redesign) - would have double-bound every sidebar click handler (search input firing twice,
+  a single collapse-button click toggling the class twice and net-cancelling itself, etc). Fixed by
+  not re-calling it; `restore_panel_states()`/`bind_global_events()` were added to the constructor
+  instead, after the existing `build_layout()` call, without touching that call itself.
+- **Asymmetric localStorage persistence**: the draft added `persist_panel_state('right', ...)` to
+  the right-panel toggle handler but not the equivalent call for the left sidebar toggle handler -
+  the sidebar's manual collapse/expand would never survive a reload while the right panel's would.
+  Fixed by adding the matching call to both handlers.
+- **Wrong anchor line for the context-bar field wrapping**: the draft anchored the "wrap the 5
+  fields into a collapsible container" code right after `this.$context_bar = this.$container.find(
+  '.ai-assistant-context-bar')` - which runs *before* `this.build_context_bar()` actually populates
+  those 5 fields into `$context_bar`. Inserted there, `.find('.frappe-control')` would find nothing
+  yet, silently leaving the toggle button non-functional and the fields never wrapped. Fixed by
+  moving the insertion to directly after the `this.build_context_bar();` call instead.
+- **Fragile datetime parsing for the new relative-time helper**: the draft's `relative_time()` used
+  `frappe.datetime.str_to_obj()`, which parses via `moment(d, frappe.defaultDatetimeFormat)` - a
+  strict format string with no fractional-seconds token. Datetime fields on this bench round-trip
+  with **microsecond precision** (confirmed live this session against real `AI Saved Report.
+  last_refreshed`/equivalent field values, e.g. `"2026-07-19 01:27:33.151565"`), which that format
+  string doesn't account for - parsing wasn't guaranteed to succeed. Fixed by normalizing the string
+  to ISO 8601 (`replace(' ', 'T')`) and using the native `Date` constructor instead, which handles
+  fractional seconds natively and sidesteps the moment-format-mismatch risk entirely. (`str_to_user`
+  is still used for the `>=7 days` fallback case - that call was already proven safe, it's used
+  identically elsewhere in this same file's `format_cell`.)
+- **Three CSS syntax typos**: `word-break: break-word.`, `transition: transform 0.08s linear.`, and
+  `white-space: nowrap.` each had a trailing period instead of a semicolon (three separate instances
+  in an otherwise-complete CSS rewrite) - each would silently drop just that one declaration (CSS's
+  per-declaration fault tolerance means the rest of each rule block still applies), regressing an
+  insight-text word-break, a voice-level-meter animation, and a dashboard-widget-title's ellipsis
+  truncation respectively versus the original file. Caught by grepping for a trailing-period-before-
+  end-of-line pattern across the full draft, not by eyeballing 1400+ lines of CSS.
+
+**Verification performed**: `node -c` syntax check (passed) on the final JS; a CSS selector diff
+confirmed every one of the 105 original class selectors still exists in the new 1463-line CSS (116
+total, the extra 11 being genuinely new classes) - i.e. the "complete rewrite" didn't silently drop
+any existing rule; brace-balance check on the CSS; `bench build --app aimatic` completed with no
+errors; `bench --site szl/siezal/hsm clear-cache` run on all three sites so the new page assets
+serve immediately rather than a stale cached copy.
+
+**NOT verified - explicitly still needed**: no live browser check was possible from this session
+(no browser-automation tool available). The drawer slide animations, backdrop click-to-close,
+Escape-key handling, localStorage persistence across an actual reload, and the responsive
+breakpoints at real narrow viewport widths have only been reviewed by reading the code, not by
+actually opening the page. This should be the first thing checked/screenshotted at real mobile and
+desktop widths before considering this redesign fully done - per this bench's own CLAUDE.md rule
+that UI changes need an actual browser check, explicitly disclosed here rather than assumed to work
+because the code review found no bugs.
+
+**Deployment note**: pure frontend (`.js`/`.css` under a Desk Page directory, not `public/`) - no
+gunicorn worker restart needed (unlike every `api.py`/`tools*.py` change documented above in this
+file), since Python worker state is irrelevant to static page assets. `bench build --app aimatic` +
+`clear-cache` (done this session) is the correct/complete deployment step here.
+
 ## Working safely
 
 Update this skill (not `CLAUDE.md` directly — see that file's own "Keeping this file current"

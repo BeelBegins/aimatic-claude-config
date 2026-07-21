@@ -80,6 +80,53 @@ only test module; `apps/aimatic/.github/workflows/ci.yml` (`bench --site test_si
 --app aimatic` against a throwaway site) is the reference for how tests *would* be invoked, not
 something to run locally.
 
+## Scheduled szl refresh from siezal (dev/test data sync)
+
+`szl` is periodically overwritten with a full copy of production `siezal` (database + files) so
+testing happens against realistic data. Script: `scripts/refresh_szl_from_siezal.sh` (not
+git-tracked — frappe-bench itself isn't a git repo). Runs via user crontab (`crontab -l`) at
+08:00 and 20:00 daily, plus on demand: `bash scripts/refresh_szl_from_siezal.sh`. Logs to
+`logs/refresh_szl_from_siezal.log`; uses `flock` (`logs/refresh_szl_from_siezal.lock`) so an
+on-demand run and the scheduled one can't overlap.
+
+Pipeline: `bench --site siezal backup --with-files --compress` → sync `encryption_key` onto szl
+→ `bench --site szl restore <db> --with-public-files <pub> --with-private-files <priv> --force`
+→ `bench --site szl migrate` + `clear-cache` → prune siezal backups older than 7 days.
+
+**This completely overwrites szl's database and files every run, by design** — any szl-only test
+data present at run time is destroyed. Also overwrites szl's Administrator password and every
+site-level credential (integration secrets, FBR tokens) with siezal's. siezal's `FBR Integration
+Settings` currently point at **Sandbox**, not Production, which is why this is safe today — if
+siezal's FBR environment is ever switched to Production, re-check whether szl needs a guard so
+test activity there can't submit real e-invoices under production FBR credentials.
+
+Two gotchas discovered building this (2026-07-20), both non-obvious and worth knowing before
+touching this script or the restore flow generally:
+
+- **`bench restore` needs the MariaDB root password** (to drop/recreate the target database
+  before importing) and prompts interactively via `getpass` if it isn't supplied — which hangs
+  forever under cron with no TTY. `frappe.database.mariadb.setup_db.get_root_connection` checks
+  `frappe.conf.get("mariadb_root_password")` / `frappe.conf.get("root_password")` *before*
+  prompting, so the fix is storing it in `sites/common_site_config.json` as `"root_password"`
+  (bench-wide, same file that already holds `openrouter_api_key`) rather than passing
+  `--db-root-password` on the CLI. Because that file now holds two plaintext secrets, it's
+  `chmod 600` (owner-only) — a permissions change from its previous `664`; don't let a future
+  `bench` operation silently loosen it back.
+- **Restoring one site's DB backup onto a different site requires syncing `encryption_key`
+  too, and the timing matters.** Each site's `site_config.json` has its own independent
+  `encryption_key` (confirmed different between szl and siezal); Password-type fields (e.g. `FBR
+  Integration Settings.security_token`) are encrypted with the *site's* key, so a restored DB
+  full of siezal-encrypted values is undecryptable under szl's own key. The script runs `bench
+  --site szl set-config encryption_key <siezal's key>` *before* the restore. This means if the
+  restore step itself then fails or is interrupted, szl is left in a broken intermediate state —
+  new config key, but still its own old data underneath — until the script completes
+  successfully. Confirmed live: an interrupted first run (root-password prompt hanging) left szl
+  in exactly this state; recovery was setting szl's `encryption_key` config back to its own prior
+  value (visible in git-untracked `site_config.json`, or recoverable from any recent
+  `sites/szl/private/backups/*-site_config_backup.json`) until the script could be re-run clean.
+  If this script ever fails mid-run, check `sites/szl/site_config.json`'s `encryption_key` before
+  assuming szl is still in a good state.
+
 ## New-site checklist
 
 1. Add the site, install apps in order: `frappe`, `aimatic`, `erpnext`, `hrms`.

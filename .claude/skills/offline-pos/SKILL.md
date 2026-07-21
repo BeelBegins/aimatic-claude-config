@@ -43,6 +43,23 @@ across cashiers, so "my session" isn't meaningful here. If a different cashier a
 profile's shift open, it surfaces under `other_open_sessions` as diagnostic info only, never
 silently reused.
 
+`close_pos_session` must likewise authorize the **human cashier**, not require the fixed terminal
+API identity to hold POS Closing Entry DocPerm. It verifies that the cashier owns the Opening
+Entry and either has `POS Supervisor`/`System Manager` or supplies a valid single-use
+`close_shift` supervisor token, then inserts/submits the Closing Entry with permissions bypassed
+inside that controlled RPC only. The bypass on the Closing Entry itself is not enough:
+`POSClosingEntry.on_submit` creates a Merge Log and consolidated Sales Invoice whose permissions
+are checked independently. After inserting the Closing Entry under the terminal identity,
+`close_pos_session` therefore switches to `Administrator` only around `closing.submit()` and
+restores the terminal user in `finally`; this also gives >=10-invoice queued consolidation jobs
+the correct execution user. Do not restore a leading `frappe.has_permission("POS Closing
+Entry", "create")` check against the request session or remove the controlled
+`ignore_permissions` flags: production `siezal` terminals intentionally authenticate as
+`cashier2/3/4` with POS User only, and that extra transport-identity check blocked both a real
+supervisor cashier and the supervisor-token path before their actual authorization was evaluated.
+The generic POS Closing Entry Custom DocPerm remains POS-Supervisor-only, so a plain POS User
+still cannot create one directly through Desk or `/api/resource`.
+
 ## Idempotency
 
 `submit_online_sale`/`submit_pos_refund` key off `terminal_invoice_id`/`terminal_refund_id`
@@ -82,6 +99,27 @@ new shift starts), and validates the cart's server-side version before allowing 
 Once the entered amount fully covers the remaining balance, the dialog deliberately does **not**
 auto-submit — it shows "Payment Ready" and requires one more explicit F6/click, specifically so a
 mistyped last split-payment leg has a beat to be caught before the sale actually submits.
+
+**Cash tendered and change (v2.7.11+, strengthened in v2.7.12, 2026-07-20)** — cash is the only payment type allowed above
+the remaining bill amount. The renderer keeps the full amount the cashier entered in
+`paymentRows` and sends it unchanged to `submit_online_sale`; it must not cap cash at the amount
+due. `_validate_and_set_payments` records that gross amount in the POS Invoice payment row and
+sets `paid_amount` to the gross tendered total, then derives `change_amount = paid_amount -
+amount_due`. The client-side `changeDue` is only an immediate UI/provisional-receipt estimate;
+the submitted POS Invoice and server-rendered receipt are authoritative. Non-cash rows remain
+capped at the remaining bill amount so card/other payments cannot become advances. This contract
+is what lets the bottom Tendered/Change block in both POS receipt layouts show the cashier's real
+cash received and returned, rather than two copies of the invoice total.
+
+Production incident on Counter 3: v2.7.11 was published, but the till remained on v2.7.10 because
+the Electron updater only checked when an administrator manually clicked the Settings button.
+Bill `ACC-PSINV-2026-00050` therefore sent/stored 750 against 750 despite the cashier entering
+1,000 and expecting 250 change. From v2.7.12, packaged Electron checks on every launch,
+background-downloads updates, and displays update-ready notices on the POS screen; installation
+remains explicit after finishing the current sale. Online receipt preview also replaces its local
+payment/change estimate with `submit_online_sale`'s authoritative `payments`/`change_amount`
+response before rendering. Do not diagnose this symptom as a print-template problem until the
+invoice's stored payment row and the terminal's installed app version have both been checked.
 
 **F6 (Payment) is a different screen from F7 (Benefits)** — don't conflate them. Loyalty points,
 coupon codes, and gift voucher redemption are applied via the separate **Benefits (F7)** dialog,

@@ -1,6 +1,6 @@
 ---
 name: ai-assistant-console
-description: Working on aimatic's AI Assistant Console (aimatic/ai/, aimatic/aimatic/page/ai_assistant_console/) — the Nemotron/OpenRouter-backed conversational BI assistant, its 16+ fixed tools, the dynamic-report fallback, the structured KPI/chart/table/insight response contract, conversation management, saved reports/dashboards/export, or scheduled questions/alert rules. Use whenever ai/api.py, ai/tools*.py, ai/*.py, or ai_assistant_console.js/.css changes, or a new AI Business Intelligence Console phase is being built.
+description: Working on aimatic's AI Assistant Console (aimatic/ai/, aimatic/aimatic/page/ai_assistant_console/) — the Nemotron/OpenRouter-backed conversational BI assistant, its certified tools, ERPNext report runner, governed analytics/drill-down fallbacks, structured response contract, conversation management, saved reports/dashboards/export, or scheduled questions/alert rules. Use whenever ai/api.py, ai/tools*.py, ai/*.py, or ai_assistant_console.js/.css changes, or a new AI Business Intelligence Console phase is being built.
 ---
 
 # AI Assistant Console (multi-phase AI Business Intelligence Console)
@@ -18,7 +18,11 @@ conversation management, a controlled dynamic-report fallback layer, browser-nat
 a collapsible left/right panel layout), and **Phase 3** (2026-07-18: save/pin answers, a
 dashboard builder, working CSV/Excel export, scheduled question re-runs, insight-detector-based
 alert rules) are all live. ABC/XYZ classification and role-specific landing dashboards remain
-later phases, not yet built.
+later phases, not yet built. **Phase 4** (2026-07-20) expands the certified catalogue from 25
+to 38 tools, makes catalogued ERPNext reports executable, and adds a governed semantic query
+engine plus transaction drill-down; the assistant now exposes 43 read-only function calls in
+total once the report-search/report-runner, analytics/drill-down, and legacy dynamic fallback
+are counted.
 
 **Working pattern**: Nemotron did the actual design/code drafting for nearly all three phases via
 the `ask-nemotron` CLI (see the `reference_ask_nemotron_cli` memory), with a human/Claude review
@@ -63,7 +67,80 @@ production AI Assistant down site-wide for szl/siezal/hsm simultaneously (they s
 Phase-2 until it reset. `ask()` surfaces either as a normal `NemotronError` → user-facing error
 message, not a crash.
 
-## Tools: 25 fixed + 1 controlled dynamic fallback
+## Frontend-editable model/enable settings (`AI Integration Settings`, added 2026-07-20)
+
+The API key stays exactly where it was (`frappe.conf`, per an explicit product decision - never
+stored on any doctype, never returned by any endpoint below), but the *model* and a master on/off
+switch are now editable from the Desk frontend without shell access, via a new per-site Single
+DocType `AI Integration Settings` (`aimatic/aimatic/doctype/ai_integration_settings/`, module
+`Aimatic`, System-Manager-only permissions - same shape as `Shopping Settings`, the precedent this
+was modeled on). Two fields: `enabled` (Check, default 1) and `model` (Data, blank = "use the
+fallback chain below").
+
+**Config/enabled resolution order, `nemotron_client.py`**:
+1. `_get_model()`: `AI Integration Settings.model` (if non-blank) → `frappe.conf.get
+   ("openrouter_nemotron_model")` → hardcoded `DEFAULT_MODEL`. The doctype is the new highest-
+   priority tier; a site that never touches it behaves exactly as before this feature existed.
+2. `_check_enabled()`, called at the very top of `get_chat_completion()` (the one choke point both
+   `ask()` and `ping()` already funnel through) - raises `NemotronError` before any network call if
+   `AI Integration Settings.enabled` is falsy. This is a real kill switch, not just a UI hint: it
+   blocks the request server-side regardless of which entrypoint or role calls in.
+3. Both read via `frappe.get_cached_doc("AI Integration Settings")` - cheap, Frappe caches Singles
+   automatically and invalidates on save, so there's no extra caching code needed here.
+
+A `[post_model_sync]` patch, `ensure_ai_integration_settings_enabled`
+(`aimatic/patches/ensure_ai_integration_settings_enabled.py`), unconditionally sets `enabled = 1`
+via `frappe.db.set_single_value` right after the doctype is created by migrate - a Single
+doctype's field JSON `"default"` isn't reliably applied just by the doctype existing, and since
+this field is a kill switch for a feature that was already working, leaving that to chance risked
+silently disabling the assistant on every site the moment this shipped. Confirmed live: all three
+sites (szl, siezal, hsm) came up `enabled=1` after migrate.
+
+**New endpoints, `aimatic/ai/api.py`**:
+- `get_ai_integration_settings()` - gated by the normal 4-role `_check_role()`, not just System
+  Manager, so every allowed user can see *whether* the assistant is enabled (used to render a
+  disabled-state banner for everyone), even though only System Manager can change it.
+- `update_ai_integration_settings(enabled, model)` - **System-Manager-only** (stricter than
+  `_check_role()`, since this is an org-wide cost/availability control). Writes both fields in one
+  `frappe.db.set_single_value(doctype, {dict})` call. No strict validation of `model` beyond a
+  plain string - a bad slug fails loudly on the next real `ask()`/`ping()` via the existing
+  `NemotronError` path, same as any other OpenRouter error this module already surfaces.
+- `list_available_free_models(force_refresh=False)` - **System-Manager-only**. Calls OpenRouter's
+  public `GET /api/v1/models` catalog (no API key needed for this endpoint specifically), filters
+  to `id.endswith(":free")` **and** `"tools" in (m.get("supported_parameters") or [])` - this
+  assistant is entirely tool-call driven, so a free model without function-calling support isn't
+  usable here regardless of price. Confirmed live (2026-07-20): OpenRouter currently lists 338
+  models total, 14 free, 13 of those tool-capable (the one exclusion,
+  `nvidia/nemotron-3.5-content-safety:free`, is a safety classifier). Cached in `frappe.cache()`
+  (Redis - shared across all 81 gunicorn workers and all 3 sites; a process-lifetime cache would be
+  useless here, unlike `report_registry.py`'s Frappe-report discovery cache) for 6 hours;
+  `force_refresh=True` bypasses it.
+
+**Frontend, `ai_assistant_console.js`/`.css`**: a `System Manager`-only "AI Settings" entry in the
+page's `...` menu (`page.add_menu_item`) opens a `frappe.ui.Dialog` (Enabled checkbox + a Model
+`Select` populated live from `list_available_free_models`, each option labelled with its context
+length, e.g. "NVIDIA: Nemotron 3 Ultra (free) — 1000K context (free)"; a static note that the API
+key itself isn't editable here). On page load, every allowed role calls
+`get_ai_integration_settings()`; if disabled, an inline `.ai-assistant-disabled-banner` renders
+above the context bar and the input/send/mic controls are disabled - so a non-System-Manager user
+gets a clear state instead of a cryptic per-message error. No workspace shortcut was added for the
+new doctype, matching the existing convention that `AI Saved Report`/`AI Dashboard`/`AI Alert
+Rule`/`AI Scheduled Question` aren't separately surfaced there either (a System Manager can still
+open `/app/ai-integration-settings` directly like any Single).
+
+**Verified live on siezal** (`bench execute`, temp module deleted after, per this module's
+established pattern): `list_available_free_models()` returns the 13 models above; overriding
+`model` via `update_ai_integration_settings` makes `nemotron_client._get_model()` pick it up ahead
+of site config; setting `enabled=0` makes `api.ping()` raise the disabled error immediately;
+clearing `model` back to blank correctly falls through to the site-config value; re-enabling
+restores normal operation. The settings were originally left enabled with blank model overrides
+after that verification. Current live configuration checked 2026-07-20: all three sites remain
+enabled; `szl` and `hsm` still have blank model overrides and therefore inherit the bench-wide
+`nvidia/nemotron-3-ultra-550b-a55b:free`, while `siezal` now explicitly overrides its model with
+`openai/gpt-oss-20b:free`. These are mutable operational settings, so query `tabSingles` or use the
+settings endpoint rather than assuming this snapshot is permanent.
+
+## Tools: 38 certified + governed report/analytics fallbacks
 
 `tools.py` (11 tools) + `tools_extended.py` (5 more, Phase 1) — all cheap `SUM`/`GROUP BY`
 aggregates with capped limits (no per-item ledger replay, no N+1 queries), Company/Branch-
@@ -461,6 +538,18 @@ enforced at the API layer):
 "user")` pattern as `_check_conversation_ownership`). `add_widget_to_dashboard` checks ownership
 of **both** the dashboard and the saved report being linked, so a user can never pull another
 user's saved report into their own dashboard.
+
+**Manual whole-dashboard refresh (added 2026-07-20)**: the custom dashboard header now has a
+`Refresh Dashboard` button. Widgets remain zero-cost point-in-time snapshots during ordinary
+open/reload; the button explicitly warns that refreshing uses OpenRouter, then calls the existing
+ownership-checked `refresh_saved_report` endpoint once per unique linked saved report. Calls run
+sequentially, never with `Promise.all`, because all sites share one free-tier key with a tight
+concurrency cap. The button shows `Refreshing X/Y`, continues past an individual request failure,
+reloads the dashboard from `get_dashboard` afterward, and reports how many widgets updated versus
+kept their previous snapshot. A response with no KPI/chart/table counts as "kept" in the UI; the
+server's existing degraded-refresh guard remains the authoritative protection that prevents a
+good stored snapshot from being overwritten. This is frontend-only (`ai_assistant_console.js`/
+`.css`): build assets and clear all site caches; no migrate or gunicorn reload is required.
 
 **Return shapes are deliberately flat** (`{"name": doc.name}`, not `{"saved_report": {...}}`/
 `{"dashboard": {...}}`) — the first frontend draft assumed nested wrapper keys it never actually
@@ -1018,6 +1107,190 @@ because the code review found no bugs.
 gunicorn worker restart needed (unlike every `api.py`/`tools*.py` change documented above in this
 file), since Python worker state is irrelevant to static page assets. `bench build --app aimatic` +
 `clear-cache` (done this session) is the correct/complete deployment step here.
+
+## Deployment gap found by auditing Error Log directly, and a fifth free-tier failure sub-case (2026-07-20)
+
+Prompted by a request to sweep the AI assistant's real Error Log entries (not just re-derive bugs
+from code reading), a direct `tabError Log` query across all three sites turned up two things:
+
+**1. The entire previous day's fix commit had never actually been deployed.** Every error
+event found (`AI Assistant: tool hallucination corrected` ×18, `AI Assistant: malformed
+tool-call text corrected` ×2, `AI Assistant: refresh produced no data, snapshot kept` ×1, all
+on siezal, all 2026-07-19 01:06-01:31) predated commit `8341239` ("AI Assistant Console: fix
+real data bugs, redesign for mobile", committed 2026-07-19 18:35:58) - the very commit
+containing the fixes for most of these failure modes (Accounts-tools GL fix propagation, the
+`tool_results` first-call-wins fix, `rank_vendors`'s Purchase-Invoice-only bug, etc., all
+documented in the two sections above). But `ps -eo lstart` on the gunicorn master showed every
+worker had started at 18:13:59-18:14:05 - **22 minutes before that commit landed** - and no
+`supervisorctl`/`kill -HUP` reload had happened since. So the fixes were sitting correctly in
+the repo the entire time this session started, completely inert in production. This is exactly
+the gap every "Deployment note" in this file has been individually flagging (no passwordless
+`sudo` in those prior sessions) - it just hadn't been confirmed end-to-end against the actual
+running process before. **Fixed this session**: `kill -HUP <gunicorn master pid>` (no sudo
+needed, matches the pattern already used elsewhere in this bench, e.g. the `mobile_sales`
+UOM work) - confirmed via `ps` that all worker PIDs cycled to a fresh start time and
+`aimatic.ai.api.ping` still responded afterward. **Lesson for next time**: after any `api.py`/
+`tools*.py` change to this module, don't just leave a "needs a restart" note - check whether a
+restart is actually still owed by comparing `ps -eo lstart` on the gunicorn master against
+`git log -1 --format=%ad` for the changed files, and do the graceful reload directly if the
+session has shell access to the process (it doesn't need root - only a full `supervisorctl
+restart` does).
+
+**2. A real, previously-unfixed bug, found only by reading a raw traceback in the Error Log**:
+two `AI Assistant Message log failed` entries on siezal (2026-07-19 01:22/01:25, both
+`role='assistant', content=''`) traced to `frappe.MandatoryError` inside `_log_turn`'s
+`doc.insert()` - `AI Assistant Message.content` is mandatory, and something was reaching
+`_log_turn("assistant", "", ...)` with a blank reply. The existing empty-reply guard (see
+"guard 3" in the section above) was `if not tool_results and not reply.strip():` - it only
+retried when tool_results was *also* empty. A second, distinct sub-case slips past every one of
+the three existing guards: the model successfully calls a real tool (`tool_results` has data),
+then returns an empty `content` string with no `tool_calls` on its closing turn. That reaches
+`_log_turn` unguarded, throws `MandatoryError`, gets swallowed by `_log_turn`'s own
+`except Exception`, and the turn silently vanishes from conversation history while the
+structured answer ships with a blank `Answer.summary` (KPIs/charts/tables from the earlier
+successful tool call still render, since those come from `tool_results`, not `reply` - meaning
+this bug produces an answer that *looks* mostly fine, real data cards, just missing the
+narrative text, which is why it wasn't obviously a broken answer until the Error Log traceback
+was read directly). **Fix, `aimatic/ai/api.py`**: widened the guard to `if not reply.strip():`
+(dropped the `not tool_results` requirement) - any empty final reply now retries regardless of
+whether tool results already exist; the model still has those results in its own message
+context, so the retry only needs to produce closing prose, not re-call anything. Reviewed by
+Nemotron (`ask-nemotron`, piped the relevant code + traceback as context) before applying, per
+this module's standard practice - confirmed no edge case (no legitimate reason for an empty
+final reply to exist, bounded by the existing `_MAX_TOOL_ITERATIONS`, the guard only applies to
+the no-`tool_calls` branch so a response with both tool_calls and empty content is unaffected
+and handled correctly by the tool-dispatch loop below it). **Verified** with a mocked
+`get_chat_completion` sequence (real tool call -> empty reply -> real answer): confirmed the
+retry fires exactly once, the final answer keeps the first call's KPI data, the turn is
+correctly persisted to `AI Assistant Message` this time, and no new
+`AI Assistant Message log failed` Error Log entry is produced. Deployed via the same `kill
+-HUP` graceful reload as item 1, alongside the previous day's commit.
+
+**Working-pattern note**: this was the first time in this module's history the investigation
+started from `tabError Log` directly (`bench --site <site> mariadb -e "SELECT ... FROM
+\`tabError Log\` WHERE method LIKE '%AI Assistant%' ..."`) rather than from a user-reported
+symptom or a code-reading pass - worth repeating periodically on all three sites, since (as item
+1 above shows) a real fix can sit fully written and reviewed in the repo for hours without
+protecting a single real user request if nobody separately confirms the deploy step actually
+landed.
+
+## Phase 4 — certified-tool expansion, ERPNext report execution, and governed analytics (2026-07-20)
+
+Phase 4 expands the assistant without implementing the external review's suggested ~80 one-off
+tools wholesale. `tools_expanded.py` adds 13 certified tools, bringing the fixed catalogue from
+25 to 38: `get_sales_trend`, `get_hourly_sales_pattern`, `get_discount_overview`,
+`get_sales_by_item_group`, `get_selling_below_cost`, `get_supplier_price_comparison`,
+`get_po_receipt_variance`, `get_purchase_concentration`, `get_stock_aging`,
+`get_reorder_recommendations`, `get_negative_stock_check`,
+`get_customer_activity_segments`, and `get_open_documents_overview`. They use the existing
+`tools.py` company/branch/warehouse resolvers, capped aggregate queries, and the same POS-only
+revenue / GL-based balance rules documented above. `get_reorder_recommendations` is now the
+purpose-built answer for "what should I order/restock?"; it uses recent sales velocity, an
+explicit lead-time assumption, and a 50% safety buffer rather than making the LLM infer a reorder
+point from `get_inventory_vs_sales`.
+
+`report_runner.py` adds `list_frappe_reports` and `run_frappe_report`. The first searches the same
+allowlisted Query/Script Report catalogue `report_registry.discover_frappe_reports()` already
+maintained; the second rejects any name outside that catalogue, force-overwrites the company
+filter with `_resolve_company()`, and calls `frappe.desk.query_report.run()` so the report's own
+`ref_doctype`/report permission checks still run. Only the first 200 normalized result rows can
+reach the model. `report_registry.py` has explicit DataSource entries for both tool calls in
+addition to the discovered report records themselves.
+
+`analytics_engine.py` adds the semantic-layer fallback `run_analytics_query` and
+`drill_down_transactions`. Four datasets are exposed: sales (POS Invoice only), purchases
+(Purchase Invoice + Purchase Receipt as separate measures, plus GL-based outstanding), current
+inventory (Bin + Stock Ledger Entry velocity), and payables (GL Entry, positive-net-supplier
+balances only). Measure and dimension names are looked up in fixed Python dictionaries that map
+to pre-written SQL expressions; filter values remain parameterized; company and restricted-branch
+scope are always server-derived; result limits are server-capped. The model can never provide a
+table name, SQL fragment, measure expression, or dimension expression. Previous-period comparison
+uses the immediately preceding equal-length period, and drill-down returns capped, linkable source
+documents/vouchers using the same scope. For item-group sales, each invoice's grand total is
+allocated proportionally by line base-net amount so grouped `net_sales` reconciles to the certified
+header total instead of silently excluding taxes.
+
+`api.py` now exposes 43 total function calls (38 certified + report search/run + analytics query/
+drill-down + the legacy dynamic fallback), raises `_MAX_TOOL_ITERATIONS` from 5 to 8, and groups
+the system prompt by Sales / Profitability / Purchasing / Inventory / Customers / Finance /
+Operational categories. Fallback priority is explicit: purpose-built tool first, then
+`run_analytics_query`, then `list_frappe_reports` + `run_frappe_report`, and only then
+`run_dynamic_report`. The pre-existing malformed-JSON/tool-hallucination/empty-reply guards remain
+generic and still apply to the larger catalogue.
+
+**Review bugs caught before deployment (Claude session hit its limit immediately after the first
+4e edit; Codex resumed from the transcript and completed this review):**
+1. Ungrouped purchases, inventory, and payables silently defaulted to supplier/warehouse rows,
+   while the response labelled them ungrouped; this produced no KPI instead of one true total.
+   Fixed with explicit `"Total"` grouping paths.
+2. Previous-period merge iterated only current-period keys, silently dropping a branch/category
+   that existed only in the prior period. Fixed by merging the union of both key sets.
+3. Purchase/payable balance measures ignored the requested as-of date, so a "previous period"
+   comparison returned today's balance twice. GL queries now use `posting_date <= date_to`.
+4. Payable drill-down ignored both branch permissions and its advertised date filters. Both are
+   now force-applied; PO/receipt variance also gained its missing `po.company` predicate.
+5. `get_sales_by_item_group` calculated share percentages after SQL `LIMIT`, making the displayed
+   subset always add to 100%. It now computes the denominator across all qualifying groups before
+   slicing the returned page.
+6. New price comparison / below-cost / concentration / open-document tools did not consistently
+   apply restricted users' branch scope. Their signatures, tool schemas, queries, and DataSource
+   metadata now agree; below-cost pricing resolves only the visible branches' existing
+   `default_selling_price_list` values and never calls the shelf-pricing write helper.
+7. `list_frappe_reports`/`run_frappe_report` were exposed to the model but omitted from
+   `TOOL_REGISTRY`, so rich answers could not cite them as sources. Added both entries.
+8. Several new bar charts could exceed the module's established `_MAX_CHART_BARS = 10` rule, and
+   inventory drill-down rendered `qty_change` as text. Both response-shape issues were corrected.
+
+**Live read-only verification on `siezal`**: syntax compilation passed; ungrouped sales returned
+one total (PKR 186,867 / 49 transactions for 2026-07-01..20); purchase analytics returned one row
+(PKR 63,933.94 goods received and PKR 43,789,931.11 outstanding); payables returned the identical
+PKR 43,789,931.11 established GL total; inventory returned PKR 43,459,960.81 current stock value,
+exactly matching a real `Warehouse Wise Stock Balance` run through the new report runner. The
+item-group previous-period path, PO/receipt variance, purchase concentration, item-group shares,
+below-cost scan, and open-document overview all returned valid production shapes.
+
+Final wiring check in a real `siezal` Frappe console: 43 tool specs, 43 unique names, 43 dispatch
+entries, with no spec/dispatch differences. A real natural-language `ask("What should I order
+today?")` routed to `get_reorder_recommendations` and persisted a complete reorder table. A second
+natural-language item-group comparison call ended without a persisted turn before the shell call
+returned; the underlying `run_analytics_query(..., dimension="item_group",
+compare_previous_period=True)` path itself is live-data verified, but do not claim that particular
+free-tier routing phrase is proven until it succeeds through the browser or a later `ask()` retry.
+Do not burn the shared daily quota repeatedly on it just to turn this note green.
+
+Deployment completed after the final Python edits: the old preloaded gunicorn master PID 21304 was
+sent `HUP`; supervisor brought the web group back as master PID 23003 with 81 fresh workers, and
+`GET /api/method/frappe.ping` returned `{"message":"pong"}` through the `siezal` Host route.
+
+**Important caveat on the above, found 2026-07-22**: despite the "deployment completed" note,
+none of Phase 4's changes were ever actually committed to git — they sat in the `apps/aimatic`
+working tree (modified `answer_builder.py`/`api.py`/`chart_recommender.py`/`report_registry.py`,
+new `analytics_engine.py`/`report_runner.py`/`tools_expanded.py`) for two days with no commit.
+Discovered only because a follow-up session went looking for uncommitted work. **Lesson**: a
+"deployment completed" note in this file describes the running gunicorn process at that moment,
+never the git state — always separately check `git status`/`git log` before assuming Phase-N work
+is safe from being lost, especially across a session-limit cutoff like the one that interrupted
+4e here (see "Phase 4" above).
+
+**A ninth review bug, found by a follow-up review pass, not live testing**: `run_frappe_report`
+(`report_runner.py`) force-applies the caller's company the same way `dynamic_report.py` does, but
+had no branch-scoping guard at all — every other tool in this module force-applies
+`_resolve_branch_filter` for a branch-restricted user, but an arbitrary cataloged ERPNext
+Query/Script Report's own SQL/script is not guaranteed to respect a caller's Branch User
+Permission the way `frappe.db.get_list` does (many core reports run raw SQL with zero row-level
+permission filtering). A branch-restricted `POS Supervisor` (a real, expected shape for that role
+in this app's Branch model, even though no current site happens to have a multi-branch restricted
+user today — `szl`/`siezal` currently each have only one Branch, so this was findable only by
+reading the code, not by live-testing against current data) could otherwise get another branch's
+data through this one tool while every purpose-built tool would have correctly scoped it. **Fix**:
+`run_frappe_report` now calls `_resolve_branch_filter(company, None)` first and refuses to run any
+report at all (returns an `{"error": ...}` steering the model back to a purpose-built tool or
+`run_analytics_query`) whenever that returns non-`None` (i.e. the caller sees a strict subset of
+the company's branches). Verified via monkeypatching `_resolve_branch_filter` (no live multi-branch
+restricted user exists on any current site to exercise this end-to-end): a simulated restricted
+caller is correctly blocked with the new error, and a simulated unrestricted caller still runs the
+report normally. `list_frappe_reports` needed no change — it only returns report names/descriptions,
+never row data.
 
 ## Working safely
 

@@ -56,7 +56,13 @@
       "Bash(git -C /home/nabeel/frappe-bench/apps/aimatic ls-files)",
       "Bash(gh auth *)",
       "Bash(git -C /home/nabeel/Posapplication ls-files)",
-      "Bash(gh repo *)"
+      "Bash(gh repo *)",
+      "Bash(sudo -n supervisorctl status)",
+      "Bash(echo \"exit:$?\")",
+      "Bash(find / -maxdepth 4 -iname \"*frappe-bench*supervisor*\")",
+      "Read(//etc/supervisor/**)",
+      "Bash(ask-nemotron --max-tokens 3000 'I need you to do essentially all the design/implementation work for a new Frappe Print Format in the aimatic app: a '\\\\''Stock Acknowledgement'\\\\'' print format for the Purchase Receipt doctype. *)",
+      "Bash(echo \"EXIT: $?\")"
     ]
   }
 }

@@ -729,6 +729,64 @@ work (same one used for every live Playwright verification in this module); a bu
 wanting their own copy needs `add_widget_to_dashboard` run again under their own login — there is
 no dashboard-sharing feature yet.
 
+## Executive KPIs dashboard (built 2026-07-22) — a second, pure-KPI-only dashboard
+
+User feedback on the original Executive Overview dashboard: "widgets did not help me much" - a
+mix of KPI cards, charts, and (per the widget-grid CSS fix above) internally-scrolling tables in
+every widget was more clutter than a glanceable executive view needed. Built a second dashboard,
+**"Executive KPIs"**, same ownership/scripting convention as Executive Overview (real `tools*.py`
+calls + `answer_builder.build_response` + `save_report`/`create_dashboard`/`add_widget_to_dashboard`
+via `bench execute`, `frappe.set_user("Administrator")` first - **no LLM call at all**, since a
+pure KPI number needs none of `ask()`'s natural-language composition and this sidesteps every
+free-tier flakiness failure mode documented elsewhere in this file entirely), on all three sites
+(szl, siezal, hsm), size `Small` throughout since every widget is KPI-cards-only. 15 widgets, one
+tool call each, `charts`/`tables` explicitly blanked (`d["charts"] = []; d["tables"] = []`) on the
+`StructuredResponse.to_dict()` before saving so **only** `kpis` renders - `render_dashboard_view`
+only appends what's actually present in each key, so blanking is sufficient, no schema change
+needed. Covers Sales (MTD), Gross Margin (MTD), Purchasing (MTD - see below), Outstanding
+Payables, Outstanding Receivables, Cash & Bank Balance, Profit & Loss (MTD), Returns (MTD), Active
+Shifts, Dead Stock Value, Discount Given (MTD), Tax Liability (cumulative, `date_from="2000-01-01"`
+- a liability balance, not a period movement, so a real MTD window would understate it the same
+way `get_trial_balance_summary`'s Asset/Liability/Equity fields are already documented as
+cumulative-not-period elsewhere in this file), Negative Stock Alert, Customer Activity (90d), and
+Cash Flow (MTD, via `get_payment_entry_summary` - a real cash-movement complement to the accrual-
+based P&L figure above it, deliberately distinct rather than redundant).
+
+**A real bug caught before shipping, not by live testing but by reading the tool source**: the
+first draft used `get_purchase_overview`'s own `purchase_amount` KPI (`answer_builder`'s existing
+`_kpis_for_get_purchase_overview` only ever surfaces that field, never `receipt_amount`) - but that
+field sums **Purchase Invoice only**, and every site here records real purchasing activity mostly
+via Purchase Receipt (same fact already documented for `rank_vendors`/payables elsewhere in this
+file), so it rendered a flatly misleading "Purchase Spend: PKR 0" on siezal. Fixed by swapping the
+widget's source tool to `get_purchase_concentration` instead (renamed widget "Purchasing (MTD)"),
+which already correctly merges Purchase Invoice + Purchase Receipt (Invoice wins when a supplier
+has both) per its own docstring - this KPI-only dashboard is the first place in this module that
+surfaces a real MTD purchase-spend figure at all, since `get_purchase_overview`'s Invoice-only
+number was the only prior KPI mapping for "purchase spend." Confirmed live: swapping the source
+took szl's/siezal's "Total Purchase Spend" from PKR 0 to the correct PKR 63,933.94 (matching the
+same figure independently verified against `get_purchase_concentration` during the Phase 4 review
+above), while hsm genuinely has zero purchase activity this month so PKR 0 there is correct, not a
+bug.
+
+**A known, pre-existing data-quality distortion, surfaced but deliberately not "fixed" here**: the
+Profit & Loss (MTD) widget's Net Profit/Net Margin % are wildly inflated on **every** site (szl
++43.5M/9858%, siezal +43.5M/9858%, hsm +46.2M/545289%) because each site's one-time iPOS-migration
+opening-stock-value Journal Entry against its `Stock Adjustment` expense account happens to be
+dated inside the current calendar month window (szl/siezal: 2026-07-14; hsm: its own equivalent
+migration date) - the exact same artifact already documented under "Branch ↔ Warehouse ↔ Cost
+Center model" / the trial-balance notes above (`5119 - Stock Adjustment - SSM`'s ~-43.5M one-time
+balance), just now visible in a headline KPI instead of a supporting balance-sheet field. This is
+a real accounting artifact, not a code bug - the widget is kept (the underlying question, "what's
+our P&L this month," is still legitimate) rather than silently reworked to exclude one specific
+account, since a future site's own one-off migration/adjustment entry would just recreate the same
+distortion under a different account name. Told to the user directly rather than presented as a
+trustworthy headline number; worth revisiting (e.g. a P&L variant that excludes non-operating
+one-time adjustment accounts) if this dashboard is used regularly enough that the distortion
+becomes a recurring point of confusion.
+
+**Deployment**: none needed - this dashboard is pure data (real `AI Saved Report`/`AI Dashboard`
+documents), not a code change; no `bench build`/`clear-cache`/gunicorn restart applies.
+
 **Gotcha — `bench console` executes piped input line-by-line as separate REPL cells, not as one
 script**: piping a multi-line Python file directly into `bench --site <site> console` (`bench
 --site szl console < script.py`) breaks any `for`/`try` block spanning multiple logical lines —

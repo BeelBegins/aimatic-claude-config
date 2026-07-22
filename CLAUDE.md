@@ -24,7 +24,7 @@ This is a **Frappe bench** (`/home/nabeel/frappe-bench`), the standard multi-app
 
 ## Related repositories
 
-All custom work is committed to one of two GitHub repos under the `BeelBegins` org, kept separate from this bench so they can be pulled into any future project:
+Application code is committed to two GitHub repos under the `BeelBegins` org. Shared Claude guidance is committed separately in this bench root's `BeelBegins/aimatic-claude-config` repository so the root `CLAUDE.md` and `.claude/skills/` remain portable:
 - **`apps/aimatic`** (this directory, remote `github.com/BeelBegins/aimatic`) — the Frappe backend app described below.
 - **`~/Posapplication`** (`/home/nabeel/Posapplication`, remote `github.com/BeelBegins/Posapplication`) — a *separate* repo, not inside this bench: the shared Electron/Capacitor client for focused POS, Restaurant, Sales, and Shopping products. Electron remains POS-only; Android POS uses device enrollment and OAuth2 PKCE. It has independent history/versioning (currently v3.0.0). Real releases (Windows installer + all 4 signed Android APKs + Shopping web) are built and published automatically by GitHub Actions on every push to its `main` branch. Use **`posapplication-release`** for the shared CI/version workflow, then the matching **`release-pos-apk`**, **`release-restaurant-apk`**, **`release-sales-apk`**, or **`release-shopping-apk`** skill for product boundaries and checks.
 

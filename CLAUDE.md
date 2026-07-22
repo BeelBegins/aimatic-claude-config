@@ -78,6 +78,12 @@ files/...` or `private/files/...`), but the script file itself belongs in this d
   the more complete starting point for a new site (adds the Item Group tree, `MRP` fallback chain,
   `Exempt` WHT-category naming, Contact-record mapping — see the two `.md` files for what's specific
   to `siezal`'s data vs. generally reusable).
+- Separate post-import catalogue enrichment scripts also live there. In particular,
+  `update_siezal_item_brands.py` joins the AI catalogue's `ItemCode` to ERPNext
+  `Item Barcode.barcode`, normalizes superficial brand spelling variants, and refuses to guess tied
+  multi-brand conflicts. Its 2026-07-23 SIEZAL pass assigned 7,318 Items, created 831 Brand masters,
+  and left 40 ties blank; the script remains dry-run by default. Exact rules and backup/verification
+  counts are maintained in `ipos_data_migration/import.md`.
 - Do not keep the authoritative mapping or a script only inside a site-private file such as
   `sites/<site>/private/files/import.md`; site-private copies can exist as run artifacts, but the
   maintained source of truth belongs in `apps/aimatic/ipos_data_migration/`.

@@ -54,6 +54,15 @@ outside the one repo that owns it.
   parents; watch for spreadsheet footer/totals rows (blank `ItemCode`+`Description` but
   a formula string like `=SUBTOTAL(...)` in one cell) — skip these explicitly or they
   create a phantom Item on every re-run.
+- Follow-up AI catalogue brand files use `ItemCode` as a **barcode**, not ERPNext's
+  `Item.item_code`: join it to `Item Barcode.barcode` and take `AiBrand`. Skip blank/
+  `Generic` brands, codes shorter than 8 characters, and unmatched barcodes. Normalize
+  case/space/punctuation-only spelling variants before voting; use a strict majority
+  when one Item has competing real brands and leave equal-count ties blank for review.
+  Create missing Brand masters, hard-guard the target site, keep `DRY_RUN = True` by
+  default, and take a backup before the live pass. The SIEZAL implementation is
+  `update_siezal_item_brands.py`; its 2026-07-23 live pass assigned 7,318 Items and
+  created 831 Brand masters, while leaving 40 tied conflicts untouched.
 - Zero-valuation stock entry rows need `allow_zero_valuation_rate` set conditionally
   (`rate <= 0` only), never blanket.
 

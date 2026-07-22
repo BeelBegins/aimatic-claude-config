@@ -750,6 +750,27 @@ siezal and hsm each hit exactly 2 of these transient failures; a short (15-20s) 
 just the failed question(s) — re-running `ask()`, `save_report()`, `add_widget_to_dashboard()` for
 those alone against the same already-created dashboard — succeeded every time on the next attempt.
 
+**Uneven-looking widget grid, found and fixed 2026-07-22**: user-reported "widgets view is bad."
+`.ai-assistant-widget-body` had no vertical cap (only `overflow-x: auto` for wide tables), and
+`.ai-assistant-dashboard-grid` is a plain `flex; flex-wrap: wrap` with the default
+`align-items: stretch` — so a widget holding a long, uncapped table (confirmed live: "Dead Stock
+Risk" renders all 30 rows, "Payables Aging"/"Vendor Margin Ranking"/"Outstanding Payables" render
+10) stretched every other card sharing its flex row to match its full height, producing a visibly
+uneven grid (a 1-2-KPI card next to a 30-row table looks either badly stretched with a huge empty
+gap, or badly mismatched in height) — the opposite of `render_dashboard_view`'s own stated design
+intent, "a focused glance, not a full answer replay." **Fix, `ai_assistant_console.css` only**:
+`.ai-assistant-dashboard-widget` gained `max-height: 420px`; `.ai-assistant-widget-body` gained
+`overflow-y: auto`, `flex: 1 1 auto`, `min-height: 0` (the last is required for a flex-column
+child's `overflow-y: auto` to actually engage instead of just growing the parent — a standard
+flexbox gotcha); `.ai-assistant-dashboard-grid` gained `align-items: flex-start` so a short card no
+longer stretches to match a tall neighbor even before its own content hits the cap. Every widget
+now scrolls internally within a consistent card height instead of dictating its row's height.
+Deployment: pure CSS under a Desk Page directory (not `public/`) - `bench build --app aimatic` +
+`clear-cache` on all three sites, no gunicorn restart needed, same as the mobile-responsiveness
+redesign above. **Not yet verified in an actual browser** (no browser-automation tool available
+in that session) - same disclosed gap as the mobile-responsiveness redesign; check this visually
+at the next opportunity before assuming it fully resolves the complaint.
+
 ## Data-leakage fix + conversation-history optimization (2026-07-18, drafted by Nemotron, reviewed/corrected/applied by Claude)
 
 Real bug found by manual audit, not live testing: **`Scheduled Question.recipients` /

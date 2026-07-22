@@ -669,6 +669,21 @@ correctness.
   tests with a fake media device, recognition legitimately fails fast with no real speech content —
   expected, not a code defect, since it still surfaces the correct `failed` state.
 
+**Transcript reliability fix (2026-07-22)**: the default locale is now `en-PK` (rather than
+`en-US`) for local English accents, with a real two-way `en-PK` ↔ `ur-PK` switch. Treat
+`continuous = true` as advisory only: mobile Chrome still ends a recognition cycle after silence,
+so `onend` commits the current final/interim text and automatically starts a fresh cycle while
+`voice_should_listen` remains true. Transcript state is split into the exact textarea value that
+existed before recording, committed prior-cycle speech, and the current cycle's final/interim text;
+cycle-boundary word overlap is deduplicated so a restarted browser service cannot repeat the tail
+of the prior phrase. Discard restores the pre-recording textarea instead of deleting typed text.
+Stop/error/end paths all close the duration timer, animation frame, media tracks, and AudioContext.
+When Send is tapped, `finish_voice_for_send()` freezes the displayed transcript, detaches late
+recognition callbacks, and aborts the old recognizer so it cannot refill the cleared textarea while
+the question is already being answered. A temporary mocked-SpeechRecognition lifecycle test
+verified pause restart, overlap deduplication (English and Urdu), language switching, cleanup, and
+the Send race; real speech accuracy still depends on the browser/vendor recognition service.
+
 **Phase 3 additions (2026-07-18)**:
 - **Save button** on every rich answer (after follow-up chips) calls `save_report` with the
   question (passed as a closure argument from `_send_message_now` through

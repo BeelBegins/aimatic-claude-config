@@ -29,16 +29,21 @@ actually wanted; as of writing it's Purchase-Receipt-only by design, not an over
   (a dismissed dialog, a denied permission, or a receipt submitted outside the Desk UI must still
   be recoverable).
 
-## Branch price list is created lazily, once, per branch — not per receipt
+## Branch price list is initialized once per branch
 
-`shelf_pricing/utils.py:get_or_create_branch_price_list` (verified live: `utils.py:15`) — the
-*first* Purchase Receipt for a branch to actually apply a branch price update creates
-`Selling - <Branch>`, copies every active `Item Price` row from `Selling Settings.
-selling_price_list` into it once as a baseline, links it onto `Branch.default_selling_price_list`,
-and repoints every `POS Profile` for that branch onto it. Not re-run on later receipts (idempotent
-via that same field), and **not re-triggered if a POS Profile is added for that branch after this
-first run** — a known, accepted gap, not a bug to silently "fix" as a side effect of unrelated
-work. If this gap is ever closed, it needs its own explicit decision, not an incidental change.
+`shelf_pricing/utils.py:get_or_create_branch_price_list` creates `<Branch> Selling Price List` as an
+enabled, **selling-only** Price List (`selling=1`, `buying=0`), copies every selling `Item Price`
+from `Selling Settings.selling_price_list` into it once as a baseline, links it onto
+`Branch.default_selling_price_list`, and repoints existing POS Profiles for that branch. Creation
+is now triggered immediately by `branch_management.events.initialize_branch_selling_price_list`
+on Branch `after_insert`, not deferred until the first Purchase Receipt. The helper remains the
+idempotent fallback for legacy branches and receipt updates. The Finance Setup console's
+**Initialize branch price lists** action calls
+`retail_finance_setup.api.initialize_branch_selling_price_lists` for older branches; only Accounts
+Manager/System Manager may run it. `apply_pos_profile_branch_price_list` runs on POS Profile
+validation, so profiles created after Branch initialization also use the correct branch list.
+Existing or convention-named lists must be enabled, selling, and not buying; an invalid list is
+rejected rather than silently accepted.
 
 ## Foodpanda price is flat `= custom_mrp` — no markup-percentage config, by explicit decision
 

@@ -65,6 +65,27 @@ outside the one repo that owns it.
   created 831 Brand masters, while leaving 40 tied conflicts untouched.
 - Zero-valuation stock entry rows need `allow_zero_valuation_rate` set conditionally
   (`rate <= 0` only), never blanket.
+- **Opening-stock GL posting must route through `Temporary Opening`, not `Stock Adjustment`**
+  (fixed 2026-07-23). Every Stock Entry row's `expense_account` must be set explicitly to the
+  site's `Temporary Opening` account (Asset/Balance Sheet, same suspense account the supplier
+  opening-balance Journal Entries already use) — left unset it defaults to
+  `Company.stock_adjustment_account`, an Expense/P&L account, which books the entire one-time
+  opening-stock value as phantom P&L income for whatever period the migration runs in. Confirmed
+  live on `siezal`: Rs 47.1M of opening stock had been credited to `5119 - Stock Adjustment - SSM`.
+  After both item and supplier imports are done, run `close_migration_opening_balance.py` once to
+  close `Temporary Opening`'s residual to `Opening Balance Equity` — that residual is the site's
+  real opening equity contribution/drawdown, by construction, once both migration halves share one
+  suspense account. Not retroactive to `szl`/`siezal`/`hsm`. See `import.md`'s "Opening-stock GL
+  posting" section.
+- **Journal Entry has zero `branch_management` hook coverage** (fixed 2026-07-23) — Sales/Purchase/
+  Stock Entry all get `branch`/`cost_center` force-filled by `apply_branch_defaults`, but Journal
+  Entry doesn't, so nothing populates `Journal Entry Account.branch`/`cost_center` unless the
+  migration script sets it itself. Both `import_siezal_suppliers.py`'s opening-balance JEs and
+  `close_migration_opening_balance.py`'s closing JE now call `resolve_company_branch(company)`
+  (requires exactly one Branch for the company — throws otherwise, since legacy vendor-ledger rows
+  carry no branch/location column to split on) and stamp `branch`+`cost_center` on every account
+  line. Confirmed live on `siezal`: `cost_center` on the 1,124 legacy JE lines was correct only by
+  coincidence (Company default matched the site's one Branch); `branch` was blank on all of them.
 
 **Suppliers:**
 - Group legacy rows by `StandardNTN`, not raw `NTNo`. Null out malformed `StandardNTN`

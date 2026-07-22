@@ -78,6 +78,31 @@ files/...` or `private/files/...`), but the script file itself belongs in this d
   the more complete starting point for a new site (adds the Item Group tree, `MRP` fallback chain,
   `Exempt` WHT-category naming, Contact-record mapping — see the two `.md` files for what's specific
   to `siezal`'s data vs. generally reusable).
+- **Opening-balance GL posting** (fixed 2026-07-23, `import_siezal_items.py`) — every opening-stock
+  `Stock Entry` row now sets `expense_account` explicitly to the site's `Temporary Opening` account
+  (the same suspense account the supplier script's opening-balance Journal Entries already use),
+  instead of defaulting to `Company.stock_adjustment_account` (an Expense/P&L account never meant
+  for one-time opening entries — confirmed live on `siezal`: Rs 47.1M of opening stock had been
+  credited straight to `Stock Adjustment`, reading as phantom P&L income for that posting period).
+  `close_migration_opening_balance.py` is a new cross-cutting script, run once by hand after both
+  the item and supplier imports for a site are complete, that closes `Temporary Opening`'s residual
+  balance to `Opening Balance Equity`. Not applied retroactively to `szl`/`siezal`/`hsm`'s already-
+  completed migrations — only changes how the next site's import behaves. See `import.md`'s
+  "Opening-stock GL posting" section for the full rationale.
+- **Branch/Cost Center/Accounting Dimension in migration scripts** (fixed 2026-07-23) — all three
+  scripts now set `branch`/`cost_center` explicitly rather than relying on ambient behavior.
+  `import_siezal_items.py`'s Stock Entries resolve both via `Warehouse.custom_branch` (confirmed
+  live that `branch_management`'s `apply_branch_defaults` hook already got this right for all
+  13,978 historical `siezal` rows, but the script no longer depends on that hook silently). More
+  importantly, **`Journal Entry` has no `branch_management` hook at all** — `import_siezal_suppliers.py`'s
+  opening-balance entries and `close_migration_opening_balance.py`'s closing entry both now call a
+  `resolve_company_branch(company)` helper (requires exactly one Branch, throws otherwise, since
+  legacy vendor-ledger rows carry no branch/location column) and stamp it onto every
+  `Journal Entry Account` row. Confirmed live on `siezal`: `cost_center` on the 1,124 legacy
+  opening-balance JE lines was correct only by coincidence (Company default happened to match the
+  site's one Branch), while `branch` was blank on all of them — consistent with this file's own
+  "`branch` never actually reached `GL Entry`... `Journal Entry` GL rows... unrecovered" note above.
+  Not applied retroactively; only changes the next site's import.
 - Separate post-import catalogue enrichment scripts also live there. In particular,
   `update_siezal_item_brands.py` joins the AI catalogue's `ItemCode` to ERPNext
   `Item Barcode.barcode`, normalizes superficial brand spelling variants, and refuses to guess tied
@@ -227,7 +252,7 @@ Per explicit product decision, there is no generic/shared warehouse or cost cent
 - **Rejected Warehouse was also generic** (one shared `Rejected Warehouse - ST`/`-SSM` used by *every* branch via `Branch.rejected_warehouse`) — this is the same class of bug as `Stores`/`Main` and was fixed the same way: a dedicated `Rejected <Branch> - ST`/`-SSM` warehouse now exists per branch, with each `Branch.rejected_warehouse` repointed at its own.
 - `Item Default.default_warehouse`, `Stock Settings.default_warehouse`, and `Company.cost_center`/`round_off_cost_center`/`depreciation_cost_center` no longer reference any generic record on either site.
 - `Purchase Taxes and Charges Template` masters (e.g. `Standard Rate Goods (Default) - ST`, `Pakistan Tax - SSM`) had `Main`/`Main - SSM` baked in as their default tax-row cost center — also repointed, since new tax rows built from these templates would otherwise silently reintroduce the generic cost center.
-- szl is a test bench for two companies (`Test Company`, real branches/data; `Siezal Super Market`, an empty template stub with zero branches — not yet actively used) — since `Test Company` has no reliable per-branch attribution for its pre-existing data, all of its existing stock/drafts were consolidated onto one branch, **Bahria Town Phase VIII Rwp**, as a deliberate simplification (szl is for testing workflows before they're finalized on production `siezal`, so exact historical branch attribution there doesn't matter). Production `siezal` has one real branch, Ghouri Town Phase V, and its company-level defaults now point at that branch's own cost center.
+- szl was originally a test bench for two companies (`Test Company`, real branches/data; `Siezal Super Market`, an empty template stub) — since `Test Company` had no reliable per-branch attribution for its pre-existing data, its existing stock/drafts were consolidated onto one branch, **Bahria Town Phase VIII Rwp**, as a deliberate simplification. **As of 2026-07-22, `Test Company` no longer exists on `szl` — the site now has only `Siezal Super Market`/`SSM`, the same company as production `siezal`** (confirmed via `tabCompany`; account/branch names on szl now carry the `-SSM` suffix, not `-ST`). Some older account/warehouse/cost-center names elsewhere in this file (e.g. `-ST`-suffixed examples in the bullets above and in the `Tax Formula` note above) predate this and no longer resolve on szl — treat any `- ST` suffix in this file as historical, not current. Production `siezal` has one real branch, Ghouri Town Phase V, and its company-level defaults now point at that branch's own cost center.
 - **Suggestion for when siezal adds its next branches** (currently has 1 of a planned 6): consider a dedicated non-branch "Head Office"/corporate Cost Center for `Company.round_off_cost_center`/`depreciation_cost_center`, rather than pointing those at one specific branch's cost center — mixing head-office rounding/depreciation postings into a single branch's cost center will pollute that branch's own P&L once there's more than one branch to compare against. Not done yet (only one real branch exists today, so it's moot for now); revisit before/when the next siezal branch goes live.
 - **Operational gotchas learned while doing this migration** (worth knowing before touching Warehouse/Cost Center records again):
   - GL Entry's `cost_center` is driven by each **row's own** `cost_center` field (e.g. `Stock Entry Detail.cost_center`), not the parent document's — ERPNext falls back to the parent value only when the row's own field is blank (`accounts_controller.py:get_gl_dict`). Auto-defaulting (e.g. from `Company.cost_center` at insert time) can silently bake in whatever the company default was *at that moment*, so always set row-level cost_center/warehouse explicitly when scripting transactions rather than trusting auto-default, especially mid-migration when defaults are actively changing.

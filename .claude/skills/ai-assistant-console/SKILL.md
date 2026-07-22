@@ -787,6 +787,22 @@ becomes a recurring point of confusion.
 **Deployment**: none needed - this dashboard is pure data (real `AI Saved Report`/`AI Dashboard`
 documents), not a code change; no `bench build`/`clear-cache`/gunicorn restart applies.
 
+### Top executive dashboard shortcuts (added 2026-07-22)
+
+`ai_assistant_console.js` promotes the existing **Executive KPIs** and **Executive Overview**
+dashboards into a compact strip at the top of the console, above the scrolling conversation area.
+`refresh_dashboard_list()` still gets the current user's ownership-filtered dashboards from
+`list_dashboards`; `render_executive_shortcuts()` exact-matches those two titles case-insensitively
+and renders only matches returned for that user. It never hardcodes dashboard document names,
+copies widgets, or bypasses the existing ownership checks. Each shortcut calls the same
+`open_dashboard(dashboard.name)` path as the dashboard drawer, which remains available.
+
+On phones (`<600px`) the two shortcuts remain side-by-side in equal columns with 52px minimum
+touch height; decorative icons are hidden to preserve readable labels. The strip uses `:empty`
+and `.hidden` handling so users without either dashboard do not see blank reserved space. This is
+frontend-only (`ai_assistant_console.js`/`.css`): run `bench build --app aimatic` and clear site
+caches; no migrate or Gunicorn reload is required.
+
 **Gotcha — `bench console` executes piped input line-by-line as separate REPL cells, not as one
 script**: piping a multi-line Python file directly into `bench --site <site> console` (`bench
 --site szl console < script.py`) breaks any `for`/`try` block spanning multiple logical lines —

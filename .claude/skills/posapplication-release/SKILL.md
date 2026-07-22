@@ -1,9 +1,20 @@
 ---
 name: posapplication-release
-description: Pushing to Posapplication's main branch, cutting a new POS/Restaurant/Sales/Shopping release, bumping package.json version, or anything about how the Windows installer / Android APKs / Shopping web build actually get built and published. Use before any push to ~/Posapplication's main branch, and whenever asked about release process, version bumps, or where a release artifact comes from.
+description: Coordinate the shared Posapplication release pipeline, version bump, GitHub Actions run, and combined publication. Use before any push to ~/Posapplication main, for cross-product releases, version/tag questions, CI signing or artifact publication, and route product-specific APK validation to release-pos-apk, release-restaurant-apk, release-sales-apk, or release-shopping-apk.
 ---
 
 # Posapplication release pipeline (CI-driven, not manual)
+
+## Route product work first
+
+Read the matching product skill before changing or validating that product:
+
+- `../release-pos-apk/SKILL.md` — retail POS Android plus POS-only Electron/Windows.
+- `../release-restaurant-apk/SKILL.md` — waiter Restaurant Android.
+- `../release-sales-apk/SKILL.md` — employee mobile Sales Android and matching backend rollout.
+- `../release-shopping-apk/SKILL.md` — customer Shopping Android plus web PWA.
+
+This skill owns only the shared pipeline. The four product skills own boundaries and smoke checks. The current workflow cannot publish only one APK: every push to `main` rebuilds and releases all four.
 
 ## The core fact: every push to `main` is a production release, unconditionally
 
@@ -30,7 +41,9 @@ Four jobs, gated behind one `test` job (`npm test`, must pass before anything el
 | `windows` | `windows-latest` | `electron-builder --win nsis --publish never` (3 retries on transient packaging-download failures), uploads `dist-installer/` |
 | `android` | `ubuntu-latest`, **matrix over all 4 products** (pos/restaurant/sales/shopping) | `./gradlew assembleRelease bundleRelease` per product, signed with a release keystore restored from **4 GitHub Actions secrets** (`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD` — the job hard-fails if any are unset), uploads a named `.apk` + `.aab` per product |
 | `web` | `ubuntu-latest` | `npm run build:shopping:web`, zips `dist-web/shopping/` into `Aimatic-Shopping-Web-<version>.zip` |
-| `publish` (needs all three above) | `ubuntu-latest` | downloads every artifact, runs `node scripts/publish-github-release.cjs --require-product-apks --require-web` with `GH_TOKEN: secrets.GITHUB_TOKEN` — creates **one combined GitHub Release** with all 6 assets: the Windows `.exe` installer (+ `.blockmap` for electron-updater), 4 product `.apk` files, and the Shopping web `.zip` |
+| `publish` (needs all three above) | `ubuntu-latest` | downloads every artifact, runs `node scripts/publish-github-release.cjs --require-product-apks --require-web` with `GH_TOKEN: secrets.GITHUB_TOKEN` — creates one combined GitHub Release with 8 assets: Windows `.exe`, `.blockmap`, `latest.yml`, 4 product `.apk` files, and the Shopping web `.zip` |
+
+The Android job also builds signed `.aab` bundles and retains them in GitHub Actions artifacts. `publish-github-release.cjs` currently publishes APKs, not AABs, to the public GitHub Release.
 
 ## Version bumping is not optional before a push meant to land on `main`
 
@@ -67,3 +80,5 @@ local `dist-apk/` directory.
   once the release is published, and there's no staged-rollout gate in this pipeline.
 - Update this skill and Posapplication's own `CLAUDE.md` in the same session if the workflow's
   jobs, triggers, or required secrets change.
+- After pushing, watch the workflow to completion and verify the expected product asset on the
+  GitHub Release; a successful local debug APK is not enough.

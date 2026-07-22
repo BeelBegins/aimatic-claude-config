@@ -14,7 +14,7 @@ reachable via the root `Aimatic` workspace's "AI Assistant" shortcut.
 Built as a multi-phase "AI Business Intelligence Console" per an explicit product spec
 (2026-07-17). **Phase 1** (2026-07-17: structured answers, KPI/chart/table/insight rendering,
 smart context bar, role-aware suggestions, 5 new domain tools), **Phase 2** (2026-07-18:
-conversation management, a controlled dynamic-report fallback layer, browser-native voice input,
+conversation management, a controlled dynamic-report fallback layer, free-only OpenRouter voice input,
 a collapsible left/right panel layout), and **Phase 3** (2026-07-18: save/pin answers, a
 dashboard builder, working CSV/Excel export, scheduled question re-runs, insight-detector-based
 alert rules) are all live. ABC/XYZ classification and role-specific landing dashboards remain
@@ -46,7 +46,8 @@ always restart after any `ai/*.py` change before trusting a live-site test.
 ## Nemotron client and model config
 
 `nemotron_client.py` — `get_chat_completion(messages, tools=None, tool_choice=None,
-temperature=0.2, max_tokens=1024, model=None)` wraps OpenRouter's `/chat/completions` endpoint
+temperature=0.2, max_tokens=1024, model=None, reasoning=None, timeout=60,
+return_metadata=False)` wraps OpenRouter's `/chat/completions` endpoint
 (`requests`, same timeout/header pattern as `fbr_pos/api.py:submit_payload_to_fbr`) and returns
 the raw assistant *message* dict (`content`/`tool_calls`), raising `NemotronError` on any failure
 rather than ever returning a partial/empty result. `get_completion(prompt, ...)` is a text-only
@@ -655,34 +656,39 @@ correctness.
   sidebar* underneath. Fixed by moving each toggle into its own persistent ~28px-wide sibling rail
   (`.ai-assistant-sidebar-rail` / `.ai-assistant-right-panel-rail`) that's never itself collapsed,
   simplifying the collapsed rule to plain `display: none`.
-- **Voice input** (`init_voice`/`start_recording`/`stop_recording`) uses the browser's own
-  `SpeechRecognition`/`webkitSpeechRecognition` — no new backend. Audio may be routed to the
-  *browser vendor's* own cloud recognition (e.g. Chrome→Google), not to aimatic/OpenRouter,
-  surfaced via an explicit privacy line while recording. Transcript lands in the editable textarea,
-  never auto-submitted. A live level-meter bar uses a **separate** `getUserMedia`+`AnalyserNode`
-  (SpeechRecognition exposes no raw audio data) — its `requestAnimationFrame` tick must not be
-  fought by the 500ms duration-display timer rebuilding the same DOM nodes: the duration timer
-  patches only the `.ai-assistant-voice-duration` text node, never the full
-  `render_voice_status()` rebuild. Mixed Urdu-English in one utterance isn't reliably supported (one
-  language per session) — a language-switch button substitutes for true code-switching. States:
-  idle/recording/ready/failed/permission_denied/network_error/unsupported. In headless/automated
-  tests with a fake media device, recognition legitimately fails fast with no real speech content —
-  expected, not a code defect, since it still surfaces the correct `failed` state.
+- **Voice input (replaced 2026-07-22)** (`init_voice`/`start_recording`/`stop_recording`) no longer
+  uses unreliable browser `SpeechRecognition`. `MediaRecorder` captures one microphone stream;
+  the same stream feeds the cosmetic `AnalyserNode`, and the browser converts the stopped recording
+  to mono 16 kHz PCM16 WAV before calling `aimatic.ai.api.transcribe_audio`. Recordings are capped
+  at 45 seconds (~1.44 MB WAV), never stored as `File`/conversation data, and never auto-submitted.
+  Send is disabled during recording/processing; tapping Send while recording stops it and tells the
+  user to wait/review. Discard restores the exact pre-recording textarea. All stop/error paths close
+  timers, animation frames, media tracks, and AudioContexts. States are idle/recording/processing/
+  ready/failed/permission_denied/unsupported.
 
-**Transcript reliability fix (2026-07-22)**: the default locale is now `en-PK` (rather than
-`en-US`) for local English accents, with a real two-way `en-PK` ↔ `ur-PK` switch. Treat
-`continuous = true` as advisory only: mobile Chrome still ends a recognition cycle after silence,
-so `onend` commits the current final/interim text and automatically starts a fresh cycle while
-`voice_should_listen` remains true. Transcript state is split into the exact textarea value that
-existed before recording, committed prior-cycle speech, and the current cycle's final/interim text;
-cycle-boundary word overlap is deduplicated so a restarted browser service cannot repeat the tail
-of the prior phrase. Discard restores the pre-recording textarea instead of deleting typed text.
-Stop/error/end paths all close the duration timer, animation frame, media tracks, and AudioContext.
-When Send is tapped, `finish_voice_for_send()` freezes the displayed transcript, detaches late
-recognition callbacks, and aborts the old recognizer so it cannot refill the cleared textarea while
-the question is already being answered. A temporary mocked-SpeechRecognition lifecycle test
-verified pause restart, overlap deduplication (English and Urdu), language switching, cleanup, and
-the Send race; real speech accuracy still depends on the browser/vendor recognition service.
+**Free-only OpenRouter transcription invariant (2026-07-22)**: `_get_free_audio_model()` refreshes
+OpenRouter's public model catalogue (6-hour Redis cache) and accepts a model only when its slug ends
+`:free`, prompt and completion prices are both explicitly numeric zero, input modalities include
+`audio`, and output modalities include `text`; there is deliberately no paid fallback. The current
+preferred/only qualifying catalogue entry is
+`nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free`. `transcribe_audio` role-gates through the same
+four assistant roles, strictly validates base64/format/2 MB size, sends OpenRouter's documented
+`input_audio` structure, asks for original-language/script transcription, and disables reasoning.
+The API key remains server-only.
+
+**Critical live-provider limitation, confirmed 2026-07-22**: although OpenRouter's catalogue says
+the NVIDIA free route accepts audio, its sole NVIDIA endpoint currently drops both valid MP3 and
+mono 16 kHz PCM16 WAV inputs. Live responses reported
+`usage.prompt_tokens_details.audio_tokens = 0` and returned refusals/hallucinations. Therefore the
+endpoint requires `audio_tokens > 0` before accepting any transcript; otherwise it throws the clear
+"free provider did not accept audio / no transcript inserted / no paid fallback" error. Do not
+remove this guard or claim Urdu/any-language is currently working. NVIDIA's own model card lists
+English language support; Urdu/mixed-language prompting is best-effort only if/when the provider
+starts forwarding audio. Seven isolated regression tests cover explicit-zero pricing, paid/non-audio
+rejection, no paid fallback, payload/reasoning/timeout, invalid base64, and dropped-audio rejection.
+The normal `bench run-tests` bootstrap on `szl` is presently blocked before module load by an
+unrelated overlapping 2026-2027 Fiscal Year; the same seven tests pass inside an initialized
+`bench --site szl console` unittest run.
 
 **Phase 3 additions (2026-07-18)**:
 - **Save button** on every rich answer (after follow-up chips) calls `save_report` with the

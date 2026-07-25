@@ -1,6 +1,6 @@
 ---
 name: shelf-pricing
-description: Purchase Receipt shelf-price propagation into branch Selling Price Lists, Item.custom_mrp, and the global Foodpanda Price List — validate_shelf_price_before_submit, apply_branch_price_update/apply_foodpanda_price_update, the lazy branch-price-list creation, or Item Price Update Log audit/restore-on-cancel. Use whenever shelf pricing, MRP propagation, or the Foodpanda price list comes up.
+description: Purchase Receipt shelf-price propagation into branch Selling Price Lists, Item.custom_mrp, and each branch's own Foodpanda Price List — validate_shelf_price_before_submit, apply_branch_price_update/apply_foodpanda_price_update, the lazy branch-price-list creation, custom_is_foodpanda_profile, or Item Price Update Log audit/restore-on-cancel. Use whenever shelf pricing, MRP propagation, or the Foodpanda price list comes up.
 ---
 
 # Shelf pricing (Purchase Receipt only)
@@ -29,30 +29,104 @@ actually wanted; as of writing it's Purchase-Receipt-only by design, not an over
   (a dismissed dialog, a denied permission, or a receipt submitted outside the Desk UI must still
   be recoverable).
 
-## Branch price list is initialized once per branch
+## Every branch gets two Price Lists, initialized together at Branch creation
 
-`shelf_pricing/utils.py:get_or_create_branch_price_list` creates `<Branch> Selling Price List` as an
-enabled, **selling-only** Price List (`selling=1`, `buying=0`), copies every selling `Item Price`
-from `Selling Settings.selling_price_list` into it once as a baseline, links it onto
-`Branch.default_selling_price_list`, and repoints existing POS Profiles for that branch. Creation
-is now triggered immediately by `branch_management.events.initialize_branch_selling_price_list`
-on Branch `after_insert`, not deferred until the first Purchase Receipt. The helper remains the
-idempotent fallback for legacy branches and receipt updates. The Finance Setup console's
-**Initialize branch price lists** action calls
-`retail_finance_setup.api.initialize_branch_selling_price_lists` for older branches; only Accounts
-Manager/System Manager may run it. `apply_pos_profile_branch_price_list` runs on POS Profile
-validation, so profiles created after Branch initialization also use the correct branch list.
+`branch_management.events.initialize_branch_selling_price_list` (Branch `after_insert`, name kept
+for hook-registration stability even though it now does two things) calls **both**
+`shelf_pricing/utils.py:get_or_create_branch_price_list` and
+`get_or_create_branch_foodpanda_price_list`, so every branch gets its own normal selling list
+(`<Branch> Selling Price List`) and its own Foodpanda-only list (`<Branch> Foodpanda Price List`)
+immediately, not deferred until first use. Both are enabled, **selling-only** Price Lists
+(`selling=1`, `buying=0`), linked onto `Branch.default_selling_price_list` /
+`Branch.default_foodpanda_price_list` respectively. The normal list's creation copies every
+selling `Item Price` from `Selling Settings.selling_price_list` in once as a baseline; the
+Foodpanda list does **not** — it starts empty and is populated item-by-item by
+`apply_foodpanda_price_update` from Purchase Receipts, same as the pre-2026-07-26 global list
+was. Both helpers remain idempotent fallbacks for legacy branches and are safe to call again.
 Existing or convention-named lists must be enabled, selling, and not buying; an invalid list is
-rejected rather than silently accepted.
+rejected rather than silently accepted. The Finance Setup console's **Initialize branch price
+lists** action (`retail_finance_setup.api.initialize_branch_selling_price_lists`, Accounts
+Manager/System Manager only) still only backfills the **normal** list for older branches — it was
+not extended to the Foodpanda list; `patches.create_branch_foodpanda_price_list` is what backfills
+the Foodpanda list for branches that existed before 2026-07-26.
 
-## Foodpanda price is flat `= custom_mrp` — no markup-percentage config, by explicit decision
+## Foodpanda pricing became per-branch on 2026-07-26 — `custom_is_foodpanda_profile` is the routing flag
 
-Rate and MRP both set to `custom_mrp`. Don't build markup-percentage configurability
-speculatively — it was explicitly rejected as out of scope for now. On the very first Foodpanda
-`Item Price` row for an item with no `custom_mrp` entered, it falls back to that item's
-`Standard Selling` rate (initial-setup convenience). Every later receipt with a blank MRP leaves
-an existing Foodpanda price **untouched** rather than zeroing it — never treat "no MRP on this
-receipt" as "clear the Foodpanda price."
+**Before 2026-07-26**: one single global `"Foodpanda"` Price List shared by every branch
+(`get_or_create_foodpanda_price_list`, now removed), with no field distinguishing a "Food Panda"
+POS Profile from a normal one — pure name-matching convention. This silently broke: since
+`branch_management.events.apply_pos_profile_branch_price_list` treats every branch-linked POS
+Profile identically, it unconditionally forced a Food Panda POS Profile's `selling_price_list`
+back onto its **branch's normal list** on every single save, discarding any manual assignment to
+the Foodpanda list with no error — the incident that prompted this whole rework.
+
+**Now**: `POS Profile.custom_is_foodpanda_profile` (Check, added by
+`patches.create_branch_foodpanda_price_list`) is the explicit, permanent marker.
+`apply_pos_profile_branch_price_list` checks it (via `getattr(doc, "custom_is_foodpanda_profile",
+0)`, not `.get()` — keeps it compatible with plain objects in unit tests) and routes to
+`get_or_create_branch_foodpanda_price_list(doc.branch)` instead of the normal-list function when
+set. `get_or_create_branch_price_list`'s own POS-Profile-repoint loop (on first creation of a
+branch's normal list) now excludes `custom_is_foodpanda_profile=1` profiles, and
+`get_or_create_branch_foodpanda_price_list` has the mirror-image loop that only repoints
+Foodpanda-flagged profiles. There is still no UI/validation stopping a non-Foodpanda POS Profile
+from having this box checked by mistake — it's a plain field, trust the person configuring it.
+
+`apply_foodpanda_price_update` (`shelf_pricing/api.py`) now requires the Purchase Receipt to have
+a `branch` set (same guard `apply_branch_price_update` already had) and writes into
+`get_or_create_branch_foodpanda_price_list(doc.branch)` instead of the old global list; the
+`branch` parameter to `upsert_item_price`/`log_price_update` is now `doc.branch` instead of always
+`None`, so `Item Price Update Log` rows for Foodpanda updates are now branch-attributed too.
+`restore_prices_on_cancel` needed no change — it restores by whatever `price_list` value was
+logged, so it's already price-list-agnostic.
+
+**Migration for branches that existed before 2026-07-26**:
+`patches.create_branch_foodpanda_price_list` (a) creates the two new fields above, (b)
+bootstrap-flags any existing POS Profile whose name contains "foodpanda"/"food panda"
+(case/space-insensitive) since that's the only signal available for a profile created before the
+checkbox existed, (c) if the site has **exactly one** Branch still missing
+`default_foodpanda_price_list` and an existing `"Foodpanda"` Price List, repoints that legacy
+global list onto that one branch (preserves its live item prices) rather than creating a
+duplicate — mirrors `tax_formula_setup`'s "only repair when unambiguous" precedent; multi-branch
+sites instead get a fresh list created per branch, and (d) immediately repoints each newly-flagged
+profile's `selling_price_list` rather than waiting for its next manual save. `FOODPANDA_PRICE_LIST
+= "Foodpanda"` is kept as a constant in `utils.py` purely so this patch can find that legacy name;
+nothing else creates or references it anymore.
+
+## Foodpanda price source moved from `custom_mrp` to its own field, `custom_fp_price` (2026-07-26)
+
+`Purchase Order Item` / `Purchase Receipt Item` / `Purchase Invoice Item` all carry an identical
+`custom_fp_price` (Currency) field now — added to all three for schema consistency with the rest
+of the purchase pipeline (matching how `custom_mrp`/`custom_shelf_price` already exist across all
+three), even though only Purchase Receipt's `apply_foodpanda_price_update` actually reads it.
+`custom_mrp` keeps doing everything it already did elsewhere (global `Item.custom_mrp`, the
+branch's normal selling list) — this only decouples the Foodpanda channel specifically, since
+tying Foodpanda pricing to the same field as everything else made it impossible to set a
+different Foodpanda price without also changing MRP everywhere else.
+
+**Prefill is a live client-side convenience only**, same class of mechanism as
+`purchase_history_autofill` but a different source: `public/js/foodpanda_price_prefill.js`
+(shared across all three doctypes, registered in `hooks.py`'s `doctype_js`) calls
+`shelf_pricing.api.get_current_foodpanda_price(item_code, branch)` on `item_code`/`branch` change
+and fills `custom_fp_price` with the branch's **current** Foodpanda Price List rate for that item,
+only if the field is still blank (never overwrites a manual entry). This is *not* guaranteed
+server-side — a row added another way (e.g. "Get Items From Purchase Order") keeps whatever value
+it already had, and `apply_foodpanda_price_update` falls back to its existing "leave current FP
+price untouched" behavior for that row if `custom_fp_price` is blank. `get_current_foodpanda_price`
+deliberately never calls `get_or_create_branch_foodpanda_price_list` — a plain read must not have
+the side effect of creating that Price List.
+
+Because this prefill mechanism has a fundamentally different source (current price-list state, not
+"last submitted document's value"), `custom_fp_price` is explicitly excluded from
+`purchase_history_autofill`'s own schema-driven field discovery (`_CURRENT_PRICE_LIST_DENY` in
+`purchase_history_autofill/utils.py`) — otherwise both mechanisms would compete to prefill the
+same field with different values.
+
+Rate and MRP on the resulting `Item Price` row are both still set flat, `= custom_fp_price`, no
+markup-percentage config — same explicit product decision as before, only the source field
+changed. On the very first Foodpanda `Item Price` row for an item with no `custom_fp_price`
+entered, it falls back to that item's `Standard Selling` rate (initial-setup convenience). Every
+later receipt with a blank FP Price leaves an existing Foodpanda price **untouched** rather than
+zeroing it — never treat "no FP Price on this receipt" as "clear the Foodpanda price."
 
 ## Audit trail and cancel-safe restore
 

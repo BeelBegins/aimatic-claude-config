@@ -127,19 +127,22 @@ coupon codes, and gift voucher redemption are applied via the separate **Benefit
 that flow, including a real 2026-07-16 incident where "Gift Voucher" ended up directly selectable
 as an F6 payment mode on production, bypassing F7 entirely — now guarded server-side.
 
-## Native dialog focus loss on Windows — use appConfirm/appAlert, never raw confirm()/alert()
+## Native dialog focus loss on Windows — POS confirmations stay inside the renderer
 
-Electron's native `window.confirm()`/`alert()` frequently don't return OS-level foreground focus
-to the main window afterward on Windows (a `BrowserWindow.focus()` call alone often can't reclaim
-it — Windows restricts `SetForegroundWindow` from background processes), which without a fix
-means the cashier has to manually Alt+Tab back in mid-sale. `renderer.ts`'s `appConfirm`/
-`appAlert` wrappers exist specifically to paper over this (call the native dialog, then invoke
-`focusPosWindow()` via IPC) — **every** confirm/alert call site must go through them, never a raw
-`confirm()`/`alert()`; a real incident (2026-07-16) had two call sites (`deleteHeldSaleUi`,
-`resumeHeldSale`) still calling `window.confirm()` directly, silently missing the fix.
-`main.ts`'s `window:focus-pos` IPC handler itself was also strengthened beyond a bare `.focus()`
-— it now restores-if-minimized and briefly toggles `setAlwaysOnTop` first, matching the standard
-Electron/Windows workaround for this exact class of focus-stealing bug.
+Electron's native `window.confirm()`/`alert()` repeatedly failed to return OS-level foreground
+focus to the main window on Windows, leaving scanner/keyboard input inactive until the cashier
+pressed Alt+Tab. The earlier `appConfirm`/`appAlert` workaround still called those native APIs
+and immediately toggled `setAlwaysOnTop` back off, so clear-cart and other async paths could
+still reproduce the race. `renderer.ts` now implements both wrappers with the app-owned
+`#app-message-dialog` `<dialog>` and every POS confirmation/notice awaits it — **never add raw
+`confirm()`/`alert()` back to the POS renderer**.
+
+Native system UI still exists for an unconfigured printer's Windows print dialog. `main.ts`
+therefore calls the shared delayed `restoreMainWindowFocus()` after the hidden print window
+closes; it holds the temporary always-on-top promotion for 250ms before releasing it instead of
+dropping it synchronously. The same helper backs `window:focus-pos`. Compact Electron-only
+minimize, fullscreen maximize/restore, and close buttons use narrow preload IPC methods and are
+hidden from Capacitor.
 
 ## Cross-reference
 

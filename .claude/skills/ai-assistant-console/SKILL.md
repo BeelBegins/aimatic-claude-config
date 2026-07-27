@@ -17,12 +17,21 @@ smart context bar, role-aware suggestions, 5 new domain tools), **Phase 2** (202
 conversation management, a controlled dynamic-report fallback layer, free-only OpenRouter voice input,
 a collapsible left/right panel layout), and **Phase 3** (2026-07-18: save/pin answers, a
 dashboard builder, working CSV/Excel export, scheduled question re-runs, insight-detector-based
-alert rules) are all live. ABC/XYZ classification and role-specific landing dashboards remain
-later phases, not yet built. **Phase 4** (2026-07-20) expands the certified catalogue from 25
-to 38 tools, makes catalogued ERPNext reports executable, and adds a governed semantic query
-engine plus transaction drill-down; the assistant now exposes 43 read-only function calls in
-total once the report-search/report-runner, analytics/drill-down, and legacy dynamic fallback
-are counted.
+alert rules) are all live. **Phase 4** (2026-07-20) expanded the certified catalogue, made
+catalogued reports executable, and added governed analytics plus drill-down. **Governed retail
+decision support** (2026-07-26) added invocation-preserving responses, explicit analysis plans,
+deterministic routing and confidence, ABC/XYZ, demand forecasting, price scenarios, transfers,
+promotions, RFM, baskets, vendor reliability, and anomaly detection.
+
+## Governed decision-support architecture (2026-07-26)
+
+- `api.py` stores an append-only `tool_invocations` list; never restore the old dict keyed by tool name. Repeated calls drive current/previous variance and multi-scenario output.
+- `routing_engine.py` validates the LLM analysis plan and narrows registered candidates in fixed quality order. A valid zero result stops fallback. No plan field accepts SQL or model-supplied database identifiers.
+- `response_quality.py` and `invocation_response.py` calculate direct answers, evidence-based confidence, warnings, drivers, recommendations, explainability, and result-derived follow-ups.
+- Certified engines: `abc_xyz_analysis.py`, `demand_forecasting.py`, `price_recommendation.py`, `inventory_optimization.py`, `promotion_analysis.py`, `customer_intelligence.py`, `basket_analysis.py`, `vendor_intelligence.py`, and `anomaly_detection.py`. Their registry and structured-rendering adapters live in the matching `*_registry.py` and `*_response.py` modules.
+- The model only understands the question, resolves context, selects an exposed tool, and explains returned facts. Every figure, classification, model choice, interval, constraint, scenario, KPI, chart, warning, and recommendation is server-calculated. Never add arbitrary SQL or transactional writes.
+- Price recommendations are read-only and fail closed when a required margin cannot be verified. Transfers never create Stock Entries. Missing values stay unavailable rather than becoming zero.
+- The 120-case route/tool/parameter corpus is `golden_questions.py`; formulas and limitations are in `docs/ai-business-intelligence.md`. Calculation versions are part of cached and saved results.
 
 **Working pattern**: Nemotron did the actual design/code drafting for nearly all three phases via
 the `ask-nemotron` CLI (see the `reference_ask_nemotron_cli` memory), with a human/Claude review

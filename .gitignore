@@ -8,6 +8,8 @@
 !.claude/**
 !scripts/
 !scripts/**
+scripts/__pycache__/
+scripts/**/*.pyc
 !.github/
 !.github/**
 .claude/settings.local.json

@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# Refreshes the szl dev/test site with a full copy of production siezal
-# (database + files), so szl can be used to test against realistic data.
+# HISTORICAL DESTRUCTIVE UTILITY. It once refreshed the szl dev/test site
+# from siezal. SZL is now designated future production; do not assume either
+# site's current role. The old cron entry is disabled.
 #
 # Run on demand:
 #   bash /home/nabeel/frappe-bench/scripts/refresh_szl_from_siezal.sh
-#
-# Scheduled via crontab at 08:00 and 20:00 daily (see `crontab -l`).
 #
 # WARNING: this completely overwrites szl's database and files with
 # siezal's. Any szl-only test data present at run time is destroyed.
@@ -15,6 +14,14 @@
 # with siezal's own encryption key.
 
 set -euo pipefail
+
+EXPECTED_CONFIRMATION="OVERWRITE_SZL_FROM_SIEZAL"
+if [[ "${AIMATIC_DESTRUCTIVE_REFRESH_CONFIRMATION:-}" != "$EXPECTED_CONFIRMATION" ]]; then
+    echo "BLOCKED: this historical script destroys SZL data."
+    echo "Verify both site roles, obtain explicit approval, take an independent SZL backup,"
+    echo "prepare verification/rollback, then set AIMATIC_DESTRUCTIVE_REFRESH_CONFIRMATION=$EXPECTED_CONFIRMATION."
+    exit 64
+fi
 
 BENCH_DIR="/home/nabeel/frappe-bench"
 BENCH="/home/nabeel/.local/bin/bench"

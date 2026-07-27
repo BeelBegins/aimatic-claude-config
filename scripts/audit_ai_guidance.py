@@ -17,6 +17,7 @@ FRONTMATTER = re.compile(r"\A---\n(?P<meta>.*?)\n---\n", re.DOTALL)
 REQUIRED_REFERENCES = (
     "current-state.md",
     "priorities.md",
+    "goals.md",
     "known-issues.md",
     "module-catalog.md",
     "project-knowledge-archive-2026-07-28.md",

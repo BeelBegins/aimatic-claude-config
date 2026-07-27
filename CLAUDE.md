@@ -22,6 +22,7 @@ daily/weekly. Never discard or overwrite an unfamiliar local change.
 
 Read `.claude/reference/current-state.md` before environment-sensitive work.
 Read `.claude/reference/priorities.md` before choosing what to work on.
+Use `.claude/reference/goals.md` for outcome and acceptance criteria.
 Agents may propose priority edits but must not silently change priorities.
 
 ## Non-negotiable safety

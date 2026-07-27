@@ -55,7 +55,8 @@ Load the matching skill under `.claude/skills/`:
 - `purchase-cycle`: purchase orders/receipts/invoices/returns, taxes, trade
   offers, landed cost, shelf and supplier pricing.
 - `shelf-pricing`: Selling/Foodpanda price application and rollback.
-- `offline-pos`: POS server API, shifts, payments, permissions, idempotency.
+- `offline-pos`: POS server API, shifts, payments, permissions, fresh-install
+  terminal grants, and idempotency.
 - `oauth-client-surfaces`: Android/Electron Sales, Shopping, Restaurant, POS.
 - `fbr-integration`: fiscalization and FBR submission/failure behavior.
 - `loyalty-gift-voucher`: loyalty and voucher issuance/redemption.

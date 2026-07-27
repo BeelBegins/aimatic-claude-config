@@ -289,5 +289,14 @@ session as shipping the client that supersedes them, since that would leave zero
 terminal that hasn't updated yet. Check `gh release list --repo BeelBegins/Posapplication` /
 actual deployed-terminal versions before considering that cleanup.
 
+**Fresh-install Item permission path (2026-07-28)**: `Item` remains deliberately excluded from
+the `Custom DocPerm` fixture because its hash autoname produced duplicate rows across repeated
+fixture syncs. `aimatic.patches.repair_item_custom_docperms` is therefore called through both
+paths that need it: `patches.txt` repairs upgrading sites, while
+`aimatic.setup.after_install` creates the POS roles and runs the same idempotent repair for a
+brand-new site (Frappe marks patches completed without executing them during first install).
+`aimatic.install.before_tests` also calls that shared setup so an older or partially prepared
+test site cannot hide the permission regression.
+
 Update the `offline_pos` section of the top-level `CLAUDE.md` in the same session if endpoints,
 the auth flow, or the stock/GL consolidation behavior changes.

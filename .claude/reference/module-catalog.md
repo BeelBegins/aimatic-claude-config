@@ -15,7 +15,7 @@ Use this map to select the smallest relevant skill/reference set.
 | Mobile Sales backend | `apps/aimatic/aimatic/mobile_sales/` | `oauth-client-surfaces` |
 | Shopping backend/media | shopping modules and isolated media pipeline | `oauth-client-surfaces` |
 | Restaurant backend | restaurant modules/DocTypes | `oauth-client-surfaces` |
-| AI assistant, tools, dashboards | `apps/aimatic/aimatic/ai_assistant/` and public console assets | `ai-assistant-console` |
+| AI assistant, tools, dashboards | `apps/aimatic/aimatic/ai/` and the AI console page assets | `ai-assistant-console` |
 | Reports/reconciliation | report modules, GL/Stock Ledger SQL | `sql-reconciliation` |
 | Print formats | aimatic print-format module docs/templates | `print-format-packaging` |
 | Desk workspaces/sidebar | workspace and sidebar module docs | `desk-navigation` |

@@ -7,6 +7,7 @@ an issue is fixed, retired, or newly confirmed.
 
 - Environment drift: old notes may call `siezal` production or `szl` test.
   Current designation is in `current-state.md`; verify runtime state.
+- Deferred Posapplication behavior issues are tracked in `/home/nabeel/Posapplication/docs/known-issues.md`; re-verify before treating them as active.
 - Posapplication release coupling: every `main` push publishes POS, Sales,
   Shopping and Restaurant products. See `posapplication-release`.
 - POS raw REST permission history and protected RPC replacements: see

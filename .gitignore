@@ -1,6 +1,14 @@
 *
 !.gitignore
 !CLAUDE.md
+!AGENTS.md
+!.agents/
+!.agents/**
 !.claude/
 !.claude/**
+!scripts/
+!scripts/**
+!.github/
+!.github/**
+.claude/settings.local.json
 .claude/scheduled_tasks.lock

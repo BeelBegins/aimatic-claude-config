@@ -74,7 +74,7 @@ in the flow, or a failed/retried submit could burn a voucher with no correspondi
 
 ## New-voucher bracket matching nets out same-sale redemptions — fixed 2026-07-17
 
-Real incident on production `siezal`: invoice `ACC-PSINV-2026-00027` (`grand_total` Rs 15,414)
+Real incident on the then-production `siezal` site: invoice `ACC-PSINV-2026-00027` (`grand_total` Rs 15,414)
 redeemed an existing Rs 663.36 voucher as a "Gift Voucher" payment row, then *still* issued a
 fresh Rs 616.56 voucher (4% of the full Rs 15,414) on the same submit — because
 `on_submit_issue_gift_voucher` matched brackets on raw `doc.grand_total`, and (per the section
@@ -120,7 +120,7 @@ don't let a voucher amount get silently estimated/trusted offline.
 
 ## Real incident, 2026-07-16: "Gift Voucher" as a selectable payment mode was a live fraud hole
 
-Confirmed on production `siezal`: all 4 real checkout counters (`S1GT Counter 1-4`) had
+Confirmed on the then-production `siezal` site: all 4 real checkout counters (`S1GT Counter 1-4`) had
 **"Gift Voucher" configured directly in their POS Profile payment methods list**, selectable in
 the Electron client's F6 Payment screen like Cash/Credit Card. `offline_pos/api.py`'s
 `_validate_and_set_payments` trusted `allowed_modes` from the POS Profile's own config, and its

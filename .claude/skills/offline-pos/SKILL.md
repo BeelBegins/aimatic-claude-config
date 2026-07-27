@@ -54,7 +54,7 @@ are checked independently. After inserting the Closing Entry under the terminal 
 restores the terminal user in `finally`; this also gives >=10-invoice queued consolidation jobs
 the correct execution user. Do not restore a leading `frappe.has_permission("POS Closing
 Entry", "create")` check against the request session or remove the controlled
-`ignore_permissions` flags: production `siezal` terminals intentionally authenticate as
+`ignore_permissions` flags: historically deployed `siezal` terminals intentionally authenticate as
 `cashier2/3/4` with POS User only, and that extra transport-identity check blocked both a real
 supervisor cashier and the supervisor-token path before their actual authorization was evaluated.
 The generic POS Closing Entry Custom DocPerm remains POS-Supervisor-only, so a plain POS User
@@ -205,7 +205,7 @@ Verified against the real `cashier1@aimatic.tech` account (roles `POS User`+`POS
 only, the same account used to verify the original POS Opening/Closing Entry fix) two ways: (1)
 `frappe.permissions.has_permission(doctype, ptype="read"/"create", user="cashier1@aimatic.tech")`
 for all 13 doctypes, via `bench execute` against a temp module; (2) a live HTTPS replication of
-the actual Electron sequence against production `siezal` — `frappe.auth.get_logged_user`, then
+the actual Electron sequence against the then-production `siezal` site — `frappe.auth.get_logged_user`, then
 `GET /api/resource/POS%20Profile?fields=[...]`, then `GET /api/resource/POS%20Profile/<name>` —
 using temporary API key/secret credentials generated via `frappe.core.doctype.user.user.generate_keys`
 and revoked immediately after (`frappe.client.set_value` clearing `api_key`/`api_secret`), the

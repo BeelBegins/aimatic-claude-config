@@ -20,9 +20,8 @@ requires all of:
 4. a rollback path;
 5. narrow execution with recorded results.
 
-Never run a site-copy/refresh job merely because an old schedule or runbook
-calls SZL a test site. SZL was designated future production and not live when
-confirmed on 2026-07-28; re-verify before every impactful operation.
+SZL was designated future production and not live when confirmed on
+2026-07-28; re-verify before every impactful operation.
 
 ## Routine diagnosis
 
@@ -37,8 +36,8 @@ confirmed on 2026-07-28; re-verify before every impactful operation.
 
 ## Historical procedures
 
-The previous site map, proxy incident detail, commands, new-site checklist and
-scheduled SZL refresh procedure are retained in
+The previous site map, proxy incident detail, commands and new-site checklist
+are retained in
 `references/historical-site-operations.md`. They are useful operational
 history, not authorization and not proof of current environment role. Read the
 specific section needed, verify every target/path, then apply the production

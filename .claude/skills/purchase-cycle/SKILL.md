@@ -24,6 +24,15 @@ path before changing a field or formula:
   replay/idempotency paths proportionately to the change.
 - Shelf/Foodpanda price application is separate from purchase validation.
   Load `shelf-pricing` whenever selling prices are affected.
+- `Tax Formula.gst_account` (drives the Purchase Invoice GST calc server
+  script) ships as a shared fixture with a placeholder account name, since
+  the real `GST - <company abbr>` account is site-specific. It becomes
+  dangling ("Account ... does not belong to company ...") whenever
+  `frappe.utils.fixtures.sync_fixtures` runs standalone instead of through
+  `bench migrate` - the standalone call skips the `after_migrate` repair
+  (`aimatic.tax_formula_setup.repair_dangling_gst_accounts`). A daily
+  scheduled job now self-heals it, but prefer `bench migrate` over a raw
+  `sync_fixtures` call when touching aimatic fixtures. See `known-issues.md`.
 
 ## Where to inspect
 

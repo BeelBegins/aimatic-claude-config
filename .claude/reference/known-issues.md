@@ -29,6 +29,13 @@ an issue is fixed, retired, or newly confirmed.
 - FBR submission failures must remain logged and diagnosable.
 - Per-branch Foodpanda price routing and its dedicated source field must not
   regress.
+- Tax Formula.gst_account can go dangling (points at a placeholder account
+  that doesn't belong to the site's company) if `frappe.utils.fixtures.
+  sync_fixtures` is invoked directly instead of `bench migrate` - it skips
+  the `after_migrate` repair. A daily scheduled job now self-heals this
+  (`aimatic.tax_formula_setup.repair_dangling_gst_accounts`), but prefer a
+  full `bench migrate` over a standalone fixture sync for this app. See
+  `purchase-cycle`.
 
 Do not treat this file as proof an issue still reproduces. Inspect code, Git
 history, and safe runtime evidence.

@@ -36,6 +36,11 @@ an issue is fixed, retired, or newly confirmed.
   (`aimatic.tax_formula_setup.repair_dangling_gst_accounts`), but prefer a
   full `bench migrate` over a standalone fixture sync for this app. See
   `purchase-cycle`.
+- Purchase Invoice Item.custom_discount_amnt had `non_negative:1` (its PO/PR
+  Item siblings are `0`), so any Purchase Invoice against a Purchase Receipt
+  return - whose discount amount is legitimately negative - was blocked.
+  Fixed 2026-07-29 in the fixture and live on siezal/szl/hsm. See
+  `purchase-cycle`.
 
 Do not treat this file as proof an issue still reproduces. Inspect code, Git
 history, and safe runtime evidence.

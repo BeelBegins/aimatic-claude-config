@@ -1,50 +1,38 @@
 ---
 name: bench-ops
-description: Use for sites, backups, bench migrate/build/restart, workers, nginx/Caddy, HTTPS headers, new-site setup, deployment, scheduled site jobs, or any environment-sensitive operation. Always verify current site role; never rely on an old production/test label.
+description: Use for sites, backups, restore, migrate, build, restart, workers, scheduler, nginx or Caddy, HTTPS headers, new-site setup, deployment, imports, and any environment-sensitive operation. Always verify the current site role.
 ---
 
 # Bench and site operations
 
-Read `../../reference/current-state.md` first. Site role is verified runtime
-state, not a permanent property of `szl`, `siezal`, or `hsm`.
+Read `../../reference/current-state.md`, then verify the exact site, role,
+configuration, branch/commit, processes, and intended impact read-only. Never
+infer production or test status from a site name.
 
-## Production gate
+## Live-operation gate
 
-Read-only diagnosis is allowed. A live mutation, migrate, restore, import,
-deploy, restart with impact, proxy change, data refresh, or destructive test
-requires all of:
+Read-only diagnosis is allowed. Before any live mutation, migration, restore,
+import, deployment, impactful restart, proxy change, scheduled job, data repair,
+or destructive test:
 
-1. explicit approval for the exact site/action;
-2. a current appropriate backup and confirmation it completed;
-3. expected effects and post-action verification;
-4. a rollback path;
-5. narrow execution with recorded results.
+1. obtain explicit approval for the exact target and action;
+2. take the appropriate current backup and verify completion/recoverability;
+3. state expected effects and narrow post-action checks;
+4. prepare a concrete rollback path;
+5. execute only the approved scope and record results.
 
-SZL was designated future production and not live when confirmed on
-2026-07-28; re-verify before every impactful operation.
+Do not treat an old backup, a command preview, or another site's backup as
+sufficient.
 
-## Routine diagnosis
+## Diagnose and verify
 
-- Inspect `sites/common_site_config.json`, the target site's config, process
-  state and proxy config without exposing credentials.
-- For HTTPS-only validation failures, check the Caddy -> nginx forwarded
-  scheme/header chain before changing business logic.
-- Python code changes generally need the relevant workers restarted after
-  code is deployed; migrate/build alone is not always sufficient.
-- Use safe static/local tests freely, but do not run destructive or live suites
-  without the gate.
+Inspect common and site configuration without exposing secrets. For HTTPS-only
+authorization failures, verify the full forwarded-scheme/header chain before
+changing business logic. Distinguish code deployment, schema migration, asset
+build, cache clear, web-worker reload, queue-worker restart, and scheduler state;
+run only what the change requires.
 
-## Historical procedures
-
-The previous site map, proxy incident detail, commands and new-site checklist
-are retained in
-`references/historical-site-operations.md`. They are useful operational
-history, not authorization and not proof of current environment role. Read the
-specific section needed, verify every target/path, then apply the production
-gate.
-
-## Handoff
-
-Record the exact commit, target site, backup identifier, commands/actions,
-verification evidence and rollback status. If a durable site fact changed,
-update `../../reference/current-state.md` with date and evidence.
+Afterward, verify process health and the specific business behavior, schema,
+asset, job, or route affected. Report commit, target, backup identifier, actions,
+checks, and rollback readiness. Update `current-state.md` only when a current
+operational fact was actually verified and changed.

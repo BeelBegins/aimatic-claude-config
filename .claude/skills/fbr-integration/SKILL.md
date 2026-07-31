@@ -1,52 +1,38 @@
 ---
 name: fbr-integration
-description: Pakistan FBR e-invoicing work on POS Invoice — payload_builder, tax_calculator, accounting reconciliation, FBR Integration Settings (sandbox/production tokens), custom_fbr_* fields, or FBR Tax Category. Use whenever FBR submission, e-invoicing payload, or FBR tax rate/category comes up.
+description: "Use for Pakistan FBR POS e-invoicing: payload_builder, tax_calculator, accounting reconciliation, FBR Integration Settings, sandbox/production submission, custom_fbr fields, payment mode, or FBR Tax Category."
 ---
 
-# FBR e-invoicing integration (fbr_pos)
+# FBR e-invoicing
 
-## Module map
+Start in `apps/aimatic/aimatic/fbr_pos/`: `payload_builder.py` snapshots invoice
+data, `tax_calculator.py` derives line tax, `accounting.py` aligns invoice tax
+rows and payments, and `api.py` submits using server-loaded settings.
 
-`apps/aimatic/aimatic/fbr_pos/`:
-- `payload_builder.py` — builds the FBR submission payload from a POS Invoice, snapshotting
-  item/tax/customer data onto `custom_fbr_*` fields.
-- `api.py` — submits the payload; sandbox/production URL and credentials come from
-  `FBR Integration Settings`, keyed by company+branch, loaded via `settings.py:get_fbr_settings`.
-- `tax_calculator.py` — computes FBR-specific tax amounts per line.
-- `accounting.py` — reconciles the FBR tax/fee back into the invoice's own Sales Taxes and
-  Charges table (`add_fbr_sales_tax_row` for inclusive GST via an effective rate so customer
-  price doesn't change; `add_fbr_pos_fee_row` for the extra Rs. fee on sales only, never
-  returns), re-triggers `calculate_taxes_and_totals`, then aligns cash payment to the new grand
-  total (`adjust_cash_payment_to_grand_total`, skipped for returns).
+## Invariants
 
-## Hard requirements
+- Keep FBR URLs and credentials in `FBR Integration Settings`, selected by the
+  current company and branch. Never log tokens, return them to a client, place
+  them in fixtures, or include them in test output.
+- Require a valid `Item.custom_fbr_tax_category` on every item-creation/import
+  path. Use the existing exempt-category precedent only where current code does.
+- Build payloads from server documents and snapshots, never from client-trusted
+  tax, identity, payment, or invoice values.
+- Clear copied `custom_fbr_*` snapshot state on returns so each return is
+  calculated and submitted independently. Preserve original-document references;
+  do not copy the sale's submission state forward.
+- Keep inclusive GST reconciliation inside Sales Taxes and Charges and re-run
+  ERPNext totals. Apply the POS fee only to sales, not returns. Align cash to the
+  resulting authoritative total only where current return rules allow it.
+- Treat voucher redemption as payment, not a discount, so item value reported to
+  FBR remains intact. Account for the active largest-payment-mode limitation in
+  `known-issues.md` when changing mixed payments.
 
-- `Item.custom_fbr_tax_category` is mandatory in practice —
-  `tax_calculator.py:get_item_fbr_configuration()` hard-throws at POS submit time if it's
-  blank. Any new item-creation path (imports, bulk creation) must set this or fall back to the
-  `"Exempt goods"` category, matching `patches.create_item_fbr_tax_rate_field`'s precedent.
-- Returns clear the copied `custom_fbr_*` snapshot fields
-  (`events.py:clear_copied_fbr_fields_for_return`) so a refund submits to FBR independently
-  rather than inheriting the original sale's FBR state — don't "simplify" this by copying
-  snapshot values forward.
-- Never log or expose `FBR Integration Settings.security_token` or credentials client-side —
-  they're loaded server-side only via `settings.py`.
+## Verification
 
-## Known open issue (flagged, not fixed — don't silently "fix" it as a side effect)
-
-`get_payment_mode()` picks the e-invoicing `PaymentMode` field from whichever payment row has
-the largest amount, then matches "cash"/"card" in its name, else falls back to
-`FBR Integration Settings.default_payment_mode`. Gift Voucher redemption is its own Mode of
-Payment row — if it's the largest row on a sale (e.g. a big voucher covering most of the
-bill), FBR gets the fallback default instead of the actual cash/card portion paid. Not a
-crash, just a misreported field on that subset of sales.
-
-## Working safely
-
-- Test against **sandbox** `FBR Integration Settings` before touching production
-  URL/credentials — this integration talks to a real government e-invoicing endpoint.
-- Before considering a payload/tax/accounting change safe, verify the built payload and
-  resulting Sales Taxes and Charges rows against a known-good invoice's expected values, not
-  just "it didn't crash."
-- Update the `fbr_pos` section of the top-level `CLAUDE.md` in the same session if payload
-  fields, accounting reconciliation logic, or the known-issue list changes.
+Use sandbox settings first. For one known document, compare the complete payload,
+item tax values, invoice tax rows, grand total, payments, and stored response with
+independently expected values. Include one return and one rejected/failed response
+when those paths change. Confirm accounting and payload agree; a successful HTTP
+response alone is insufficient. Production credentials or submission require the
+full live-operation gate.

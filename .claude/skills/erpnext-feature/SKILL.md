@@ -1,73 +1,49 @@
 ---
 name: erpnext-feature
-description: Adding or modifying a feature, doctype hook, doc_event, custom field, or Property Setter inside apps/aimatic — new business logic touching Sales Order/Sales Invoice/Purchase Order/Purchase Receipt/Stock Entry/Item/Customer/Supplier/Branch, or any change wired through hooks.py. Never modify apps/frappe, apps/erpnext, or apps/hrms directly.
+description: Use for general aimatic features, DocTypes, hooks, doc_events, Custom Fields, Property Setters, fixtures, patches, or owned business logic that is not covered by a narrower domain skill. Never modify Frappe, ERPNext, or HRMS core.
 ---
 
-# ERPNext feature development in aimatic
+# ERPNext features in aimatic
 
-## Scope boundary
+Put all owned behavior in `apps/aimatic`. Never edit `apps/frappe`,
+`apps/erpnext`, or `apps/hrms` directly. Before adding logic, inspect
+`aimatic/hooks.py`, existing controller methods, hooks, fixtures, and patches for
+the same doctype.
 
-`apps/frappe`, `apps/erpnext`, `apps/hrms` are upstream dependencies (installed via
-`bench get-app`) — never edit them. All custom behavior belongs in `apps/aimatic`. Before
-writing new logic, check `apps/aimatic/aimatic/hooks.py` for existing `doc_events` wiring on
-the doctype you're touching, so you don't duplicate or conflict with an existing hook.
+## Lifecycle and authority
 
-## Hook-ordering gotcha (learned the hard way, don't repeat it)
+- Choose the earliest necessary event, not the most familiar one. Core
+  controller `validate()` runs before app `validate` hooks; use
+  `before_validate` when owned defaults must exist before core validation.
+- Make server behavior authoritative. Client scripts may guide input but cannot
+  be the only validation, permission, pricing, stock, or accounting control.
+- Preserve all existing handlers and their ordering when multiple modules share
+  a doctype event.
 
-For the `"validate"` doc_event specifically, Frappe's hook composer calls the doctype
-controller's own `validate()` method **first**, then app-registered `doc_events["validate"]`
-hooks **afterward** — and if the controller's own `validate()` raises, the hooks loop never
-runs. If your hook needs to fix/set something *before* the doctype's own core validation can
-object to it (e.g. correcting `cost_center`/`warehouse` before ERPNext's own subcontracting
-validation checks them), register it on `"before_validate"` instead — a distinct, strictly
-earlier lifecycle event. `branch_management/events.py:apply_branch_defaults` is the concrete
-precedent for this.
+## Branch and accounting context
 
-## Fixtures
+Reuse `branch_management.events.apply_branch_defaults` and current helpers.
+Do not introduce generic warehouse or cost-center fallback. Set row-level
+warehouse, branch, and cost center where the transaction controller reads rows;
+parent defaults alone may not reach GL or stock entries. Keep deliberately
+excluded POS flows server-owned by their POS Profile contract.
 
-Custom Field, Property Setter, Client Script, and Server Script are fixture-tracked (see
-`hooks.py`'s `fixtures`, excluding HRMS doctypes in `hrms_fixture_doctypes`). After changing
-any of these from the Desk UI, run
-`bench --site szl export-fixtures --app aimatic` in the same session so the change lands in
-git — otherwise it only exists in that site's database.
+## Fixtures and patches
 
-## Branch / Warehouse / Cost Center model
+- Track Custom Field, Property Setter, Client Script, Server Script, permission,
+  Workspace, and other configured records through the existing fixture/module
+  mechanism. Export only the affected fixture and review the resulting diff.
+- Place one-off patches in `aimatic/patches/` and register them once in
+  `patches.txt`: pre-model sync only when no new schema is required; otherwise
+  post-model sync.
+- Make patches idempotent and narrowly scoped. Fresh install may mark historical
+  patches complete without executing them, so put required baseline setup in the
+  install path as well as upgrade repair when necessary.
 
-This app enforces zero generic fallback warehouses or cost centers — every stock movement and
-GL entry must land in a branch-specific warehouse/cost-center. Any new feature touching Sales
-Order/Sales Invoice/Delivery Note/Purchase Order/Purchase Invoice/Purchase Receipt/Stock Entry
-must respect `branch_management/events.py:apply_branch_defaults` rather than introducing its
-own defaulting logic. Two things that bite people:
-- A User Permission on `Branch` does **not** cascade to `Cost Center` or `Warehouse` Link
-  fields — those need their own separate User Permission rows, or a branch-restricted user
-  still sees every branch's cost centers/warehouses in dropdowns (though the actual saved
-  value still gets force-corrected for non-override users).
-- GL Entry's `cost_center` comes from each **row's own** `cost_center` field, not the parent
-  document's — always set row-level cost_center/warehouse explicitly when scripting
-  transactions, don't trust auto-default.
-- POS Invoice (including `is_pos` Sales Invoices) is deliberately skipped by
-  `apply_branch_defaults` — it's built server-side from POS Profile already.
+## Verify narrowly
 
-## `fetch_from` gotcha
-
-If a field's value looks like it's copying the wrong thing (e.g. a Link's own name instead of
-one of its own fields), check
-`frappe.get_meta(doctype).get_field(fieldname).fetch_from` for a wrong dotted path before
-assuming it's a logic bug. Also remember `fetch_from` only populates on create/link-change,
-never live — if a value needs to stay current after the source changes, a direct write on
-`on_submit`/similar is required instead (see `item_pricing/events.py` for that pattern).
-
-## Patches
-
-New one-off data/schema patches go in `apps/aimatic/aimatic/patches/`, registered in
-`patches.txt` under `[pre_model_sync]` (before doctype migration — role creation, things that
-don't depend on new schema) or `[post_model_sync]` (after migration — custom fields, defaults
-that depend on the migrated schema).
-
-## Standard workflow
-
-- `bench --site <site> migrate` after any doctype/patch change.
-- `bench build --app aimatic` after any `public/` JS/CSS change.
-- Update the relevant module section of the top-level `CLAUDE.md` in the same session if this
-  change adds/removes a module, hook, doctype, or introduces a gotcha a future session would
-  need to know — don't defer it.
+Run syntax/static checks and validate changed JSON or embedded script first.
+Then test one normal path and the relevant denial, return, cancel, or retry path.
+Run `bench build --app aimatic` only for affected public assets. Any migrate,
+fixture export against a site, or deployment requires `bench-ops` and the
+appropriate operation gate.

@@ -1,6 +1,6 @@
 # Current operational state
 
-Last human-confirmed: 2026-07-28 (Asia/Karachi).
+Last human-confirmed: 2026-07-31 (Asia/Karachi).
 
 This file records current claims only. Verify read-only before any
 environment-sensitive action and update the date/evidence when facts change.
@@ -10,8 +10,11 @@ environment-sensitive action and update the date/evidence when facts change.
 - `szl`: designated future production site; setup/data preparation was in
   progress and it was not yet live when confirmed.
 - `siezal`: source site for the SZL catalog/setup work and historical live
-  operating data. Do not assume it remains the live endpoint after cutover.
-- `hsm`: separate configured site. Verify its role and data before changes.
+  operating data. User-confirmed 2026-07-31 as testing/development, not
+  production - still verify before high-impact changes since it responds
+  live on `aimatic.tech` and carries real historical data.
+- `hsm`: user-confirmed 2026-07-31 as testing/development. Responds live on
+  `hsm.aimatic.tech` - verify current data/role before high-impact changes.
 
 Site names do not grant permission or prove production status.
 

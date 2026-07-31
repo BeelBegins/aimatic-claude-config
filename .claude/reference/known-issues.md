@@ -1,46 +1,24 @@
-# Known issues and risk index
+# Active risks
 
-Load the owning skill/reference before investigating. Update this index when
-an issue is fixed, retired, or newly confirmed.
+Confirm each item against current code and read-only runtime evidence before
+acting. Remove it when resolved; use Git for the former explanation.
 
-## Active operational risks
-
-- Environment drift: old notes may call `siezal` production or `szl` test.
-  Current designation is in `current-state.md`; verify runtime state.
-- Deferred Posapplication behavior issues are tracked in `/home/nabeel/Posapplication/docs/known-issues.md`; re-verify before treating them as active.
-- Posapplication release coupling: every `main` push publishes POS, Sales,
-  Shopping and Restaurant products. See `posapplication-release`.
-- POS raw REST permission history and protected RPC replacements: see
-  `offline-pos`.
-- FBR integration has a deliberately flagged open issue: see
-  `fbr-integration`; do not fix incidentally.
-- AI dashboard/tool incompleteness and model/tool-call failure patterns:
-  see `ai-assistant-console/references/architecture-and-incidents.md`.
-- Print-format/POS receipt selection and cache behavior: see
-  `print-format-packaging`.
-- Legacy migration/cutover mappings and deferred stock/pricing steps:
-  see `ipos-migration` plus `apps/aimatic/ipos_data_migration/setup_szl.md`.
-
-## Recently repaired; keep regression coverage
-
-- Custom DocPerm POS grants could hide standard roles. Repair patches are in
-  `apps/aimatic/aimatic/patches/`.
-- Purchase grid header/body widths could drift during editable-grid rerenders.
-- FBR submission failures must remain logged and diagnosable.
-- Per-branch Foodpanda price routing and its dedicated source field must not
-  regress.
-- Tax Formula.gst_account can go dangling (points at a placeholder account
-  that doesn't belong to the site's company) if `frappe.utils.fixtures.
-  sync_fixtures` is invoked directly instead of `bench migrate` - it skips
-  the `after_migrate` repair. A daily scheduled job now self-heals this
-  (`aimatic.tax_formula_setup.repair_dangling_gst_accounts`), but prefer a
-  full `bench migrate` over a standalone fixture sync for this app. See
-  `purchase-cycle`.
-- Purchase Invoice Item.custom_discount_amnt had `non_negative:1` (its PO/PR
-  Item siblings are `0`), so any Purchase Invoice against a Purchase Receipt
-  return - whose discount amount is legitimately negative - was blocked.
-  Fixed 2026-07-29 in the fixture and live on siezal/szl/hsm. See
-  `purchase-cycle`.
-
-Do not treat this file as proof an issue still reproduces. Inspect code, Git
-history, and safe runtime evidence.
+- Site-role drift: names and old notes do not prove which site is live. Use
+  `current-state.md` and verify again before any impactful operation.
+- Posapplication release coupling: every push to `main` publishes POS,
+  Restaurant, Sales, Shopping, Windows, and Shopping web outputs.
+- Older Electron terminals may still depend on narrow POS Custom DocPerm grants
+  that newer clients replace with governed `offline_pos` RPCs. Confirm fleet
+  versions before removing compatibility grants.
+- FBR payment-mode selection uses the largest payment row. A large Gift Voucher
+  row can cause the configured fallback mode to be reported instead of the
+  smaller cash/card portion.
+- AI results can be incomplete even when model text looks plausible. Validate
+  tool selection, permission scope, bounded results, and response assembly.
+- POS receipt selection is runtime state: the Electron client selects an
+  enabled custom POS Invoice Print Format and does not rely on
+  `POS Profile.print_format`. Confirm the active format before editing.
+- Legacy cutover still depends on the tracked scripts and runbooks under
+  `apps/aimatic/ipos_data_migration/`; reconcile every live pass to its source.
+- Deferred Posapplication behavior risks are owned by
+  `/home/nabeel/Posapplication/docs/known-issues.md`; verify them before use.

@@ -1,60 +1,41 @@
 ---
 name: purchase-cycle
-description: Use for Purchase Order, Purchase Receipt, Purchase Invoice, purchase returns, supplier pricing, purchase taxes/formulas, trade offers, landed costs, purchase grid behavior, or any Client Script/Server Script fixture that changes procurement behavior.
+description: Use for Purchase Order, Purchase Receipt, Purchase Invoice, purchase returns, supplier pricing, purchase taxes or formulas, trade offers, landed costs, procurement grids, and purchase-related Client or Server Script fixtures.
 ---
 
 # Purchase cycle
 
-Treat procurement as one connected accounting and stock flow. Trace the full
-path before changing a field or formula:
+Trace the connected flow before editing:
 
-`Purchase Order -> Purchase Receipt/return -> Purchase Invoice/return -> stock, supplier payable, tax and selling-price effects`.
+`Purchase Order -> Purchase Receipt/return -> Purchase Invoice/return -> stock, supplier payable, tax, and pricing effects`.
 
 ## Invariants
 
-- Server-side validation/calculation is authoritative; client scripts may
+- Make server-side validation and calculation authoritative. Client scripts may
   improve entry but must not be the only correctness control.
-- Preserve document lifecycle and return semantics (`docstatus`, returned
-  quantity, references, stock and GL reversal).
-- Never trust client-supplied price/tax/account values when the server can
-  derive or validate them.
-- Branch, warehouse, cost center, company and supplier context must remain
-  aligned; do not restore generic fallbacks.
-- Test normal purchase, partial/full return, cancellation, amendment and
-  replay/idempotency paths proportionately to the change.
-- Shelf/Foodpanda price application is separate from purchase validation.
-  Load `shelf-pricing` whenever selling prices are affected.
-- `Tax Formula.gst_account` (drives the Purchase Invoice GST calc server
-  script) ships as a shared fixture with a placeholder account name, since
-  the real `GST - <company abbr>` account is site-specific. It becomes
-  dangling ("Account ... does not belong to company ...") whenever
-  `frappe.utils.fixtures.sync_fixtures` runs standalone instead of through
-  `bench migrate` - the standalone call skips the `after_migrate` repair
-  (`aimatic.tax_formula_setup.repair_dangling_gst_accounts`). A daily
-  scheduled job now self-heals it, but prefer `bench migrate` over a raw
-  `sync_fixtures` call when touching aimatic fixtures. See `known-issues.md`.
+- Preserve document lifecycle, references, `docstatus`, received/returned
+  quantities, cancellation/amendment behavior, stock reversal, GL reversal, and
+  retry safety.
+- Derive or validate prices, tax, supplier, company, account, and totals on the
+  server. Never rely on a client-supplied accounting value.
+- Keep company, branch, warehouse, cost center, supplier, and account context
+  aligned. Do not introduce generic fallback warehouses or cost centers.
+- Treat shelf and Foodpanda propagation as a separate owner. Use
+  `shelf-pricing` only when the requested change modifies selling-price effects.
 
-## Where to inspect
+## Inspect and change
 
-- `apps/aimatic/aimatic/fixtures/client_script.json`
-- `apps/aimatic/aimatic/fixtures/server_script.json`
-- purchase-related Custom Field and Property Setter fixtures
-- purchase hooks/patches in `apps/aimatic/aimatic/`
-- `shelf-pricing` for Item Price creation/restoration
+Search purchase entries in `fixtures/client_script.json`,
+`fixtures/server_script.json`, Custom Field and Property Setter fixtures, plus
+owned hooks and patches. Search by script name and embedded code, not only by
+filename. Confirm standard ERPNext behavior before adding customization, then
+change the smallest authoritative layer.
 
-The lossless pre-refactor project record remains in
-`../../reference/project-knowledge-archive-2026-07-28.md`. Search it for
-Purchase Order, Purchase Receipt, return, tax, trade offer, MRP, vendor rate,
-and Foodpanda when historical reasoning is needed.
+## Verify narrowly
 
-## Safe workflow
-
-1. Inspect local diffs and identify every document/event in the flow.
-2. Search fixtures by script `name` and embedded code, not only filenames.
-3. Confirm existing standard ERP behavior before adding custom logic.
-4. Change the smallest owning layer.
-5. Validate fixture JSON and extract/check embedded JS/Python where practical.
-6. Use a disposable/local site for behavior tests; no live mutations without
-   the production gate.
-7. Record durable decisions and known regressions in this skill or a linked
-   reference.
+Validate fixture JSON and extract-check edited embedded JavaScript or Python.
+Exercise the affected normal document and its return/cancel counterpart; add
+partial receipt/invoice, amendment, or landed-cost coverage only when the change
+touches those paths. Reconcile stock, payable, and tax values when accounting is
+affected. Use a disposable/local site for behavior tests and the production gate
+for any site mutation.

@@ -12,7 +12,9 @@ environment-sensitive action and update the date/evidence when facts change.
 - `siezal`: source site for the SZL catalog/setup work and historical live
   operating data. User-confirmed 2026-07-31 as testing/development, not
   production - still verify before high-impact changes since it responds
-  live on `aimatic.tech` and carries real historical data.
+  live on `aimatic.tech` and carries real historical data. Foodpanda schema
+  migration verified 2026-08-01 at aimatic commit `14999fa`, with pre-migration
+  backup prefix `20260801_001900-siezal`.
 - `hsm`: user-confirmed 2026-07-31 as testing/development. Responds live on
   `hsm.aimatic.tech` - verify current data/role before high-impact changes.
 

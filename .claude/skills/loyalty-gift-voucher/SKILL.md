@@ -5,44 +5,24 @@ description: Use for item-group-weighted loyalty points, Loyalty Point Entry cor
 
 # Loyalty and gift vouchers
 
-Inspect `aimatic/loyalty/`, `aimatic/gift_voucher/`, the POS submit path, and all
-POS Invoice hooks before changing event behavior. Multiple handlers share submit
-and cancel events.
+Inspect `aimatic/loyalty/`, `aimatic/gift_voucher/`, and all POS Invoice submit/
+cancel hooks — multiple handlers share those events.
 
-## Loyalty
+## Gotchas
 
-Reuse ERPNext's Loyalty Program and ledger. Keep only the earning-rate override
-custom: resolve the nearest configured Item Group ancestor and preserve the
-difference between “inherit” and an explicit zero rate. Correct ERPNext's created
-Loyalty Point Entry in place after submit, including returns. Keep the Item Group
-Hierarchy report consistent with the effective-rate rule.
-
-## Voucher rules
-
-- Match issuance criteria by exact company and branch. Keep the redemption
-  minimum independent from the issuance bracket floor.
-- Issue on submit and redeem by code on a later sale. Excess value is forfeited;
-  do not invent a remaining-balance or automatic same-sale redemption flow.
-- Compute a new voucher's bracket and amount from invoice value net of same-sale
-  voucher and loyalty redemption, while leaving FBR-facing invoice totals intact.
-- Represent redemption as the server-created `Gift Voucher` payment row, never a
-  discount. Do not add it to POS Profile payment choices.
-- Reject manually submitted Gift Voucher payment rows unconditionally and retain
-  the POS Profile validation that blocks this mode. Both controls are required.
-- Consume a voucher with a conditional active-status update only after invoice
-  submission succeeds, inside the transaction/savepoint used for POS idempotency.
-  A failed or retried sale must not burn or double-consume it.
-- Require online server validation. Never estimate, queue, or redeem a voucher
-  during an offline sale. Require possession of the code; do not expose a
-  browsable customer voucher list to cashiers.
-
-## FBR interaction and verification
-
-Keep voucher value in payments so FBR item values are not reduced. If mixed
-payment-mode reporting changes, also use `fbr-integration` because that crosses
-ownership.
-
-Test the smallest affected path: effective loyalty rate or return correction;
-voucher bracket boundaries; successful, invalid, already-used, concurrent, and
-replayed redemption; cancel behavior; and offline rejection. Reconcile the
-invoice payment rows, voucher status, loyalty ledger, and FBR-facing totals.
+- Loyalty reuses ERPNext's ledger. Only earning-rate override is custom: nearest
+  configured Item Group ancestor; distinguish inherit vs explicit zero. Correct
+  ERPNext's Loyalty Point Entry in place after submit (including returns).
+- Issuance matches exact company+branch. Redemption minimum ≠ issuance floor.
+- Issue on submit; redeem by code on a later sale. Excess value is forfeited —
+  no remaining-balance or same-sale auto-redemption.
+- Bracket amount uses invoice value net of same-sale voucher/loyalty redemption;
+  FBR-facing item totals stay intact.
+- Redemption is a server-created `Gift Voucher` payment row, never a discount.
+  Reject client-supplied Gift Voucher payment rows; keep it off POS Profile
+  tender choices.
+- Consume with conditional active-status update only after submit succeeds,
+  inside the POS idempotency transaction. Failed/retried sales must not burn or
+  double-consume.
+- Online validation only — no offline estimate/queue/redeem; no browsable
+  cashier voucher list.

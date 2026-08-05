@@ -5,46 +5,33 @@ description: Use for Purchase Receipt shelf-price propagation into branch Sellin
 
 # Shelf pricing
 
-Keep this feature scoped to Purchase Receipt. Matching fields on Purchase Order
-or Purchase Invoice provide schema continuity but do not authorize propagation
-from those documents.
+Scoped to Purchase Receipt. Matching PO/PI fields are schema continuity only —
+they do not authorize propagation.
 
-## Validation and application
+## Gotchas
 
-- Retain server `before_submit` validation that a supplied shelf price is not
-  below cost after taxes. A blank shelf price remains allowed.
-- Keep application explicit through the governed branch and Foodpanda RPCs.
-  Preserve independent confirmation, authorization, status, skip, and retry
-  behavior for both targets. A dismissed dialog, permission denial, or non-Desk
-  submit must leave a recoverable status rather than silently applying or losing
-  the update.
-- Restrict price writes to Buying Price Control or System Manager through the
-  current endpoints. Never revive an unauthenticated or generic price writer.
-
-## Routing
-
-- Send normal shelf/MRP updates to the receipt's branch Selling Price List and
-  the guarded global `Item.custom_mrp` field.
-- Route Foodpanda updates to the receipt branch's own Foodpanda Price List, using
-  `POS Profile.custom_is_foodpanda_profile` to select that list. Do not return to
-  a shared global Foodpanda list or name-based routing.
-- Read Foodpanda price from `custom_fp_price`. Blank means leave an existing
-  Foodpanda price unchanged; only the established first-price fallback may seed
-  a missing row.
-- Keep branch Price List helpers idempotent and validate that resolved lists are
-  enabled, selling-only, and assigned to the correct branch field.
-
-## Audit and cancellation
-
-Log every changed target to `Item Price Update Log` with old/new values, receipt,
-branch, price list, actor, and time. On cancellation, restore only when the
-current value still equals what that receipt last wrote; never overwrite a later
-receipt or manual edit. Respect `custom_mrp_source_date` so a backdated receipt
-cannot replace newer MRP.
-
-## Verify narrowly
-
-Test one receipt for normal branch price, Foodpanda price, blank-value behavior,
-status/retry, unauthorized access, and cancellation after a later edit when
-relevant. Confirm the exact price lists and audit rows; expand to purchase-cycle
-tests only when purchase validation or lifecycle logic also changes.
+- Server `before_submit` rejects shelf price below cost after taxes; blank is OK.
+- Application is explicit via governed branch + Foodpanda RPCs with independent
+  confirm/status/retry. Dismissed dialog or non-Desk submit must leave a
+  recoverable status, not a silent apply/loss.
+- Writes require Buying Price Control or System Manager.
+- Shelf/MRP → receipt branch Selling Price List + guarded `Item.custom_mrp`.
+  Foodpanda → that branch's own Foodpanda Price List via
+  `POS Profile.custom_is_foodpanda_profile`. No shared global Foodpanda list.
+- Blank `custom_fp_price` leaves an existing Foodpanda price unchanged.
+- `current_sale_price_preview.js` prefills blank `custom_shelf_price` only —
+  never overwrites a manual value.
+- Cancel restores only when current value still equals what that receipt wrote;
+  respect `custom_mrp_source_date` so backdated receipts cannot clobber newer MRP.
+- Branch Price Sheet Foodpanda grid/Excel import (`price_export.api`) is a second
+  governed write surface: same role gate, writes `price_list_rate`+`custom_mrp`,
+  audits via aggregate `Foodpanda Price Import Log` (not PR-scoped update logs).
+  Stock/active/qty stay server-derived read-only.
+- Branch owns Foodpanda vendor-automation SFTP CSV upload
+  (`price_export.foodpanda_sftp`): per-branch host/port/username/Password on
+  Branch, same CSV shape as Branch Price Sheet Download. Manual triggers on
+  Branch and the report, plus a 15-minute cron that uploads each branch once
+  its `custom_fp_sftp_schedule_time` is due (site timezone) when
+  `custom_fp_sftp_enabled` is on. Partner API catalog sync on
+  `Foodpanda Outlet` stays separate — never put SFTP secrets in fixtures,
+  logs, or RPC responses.

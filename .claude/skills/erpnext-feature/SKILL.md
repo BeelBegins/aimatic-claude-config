@@ -5,45 +5,23 @@ description: Use for general aimatic features, DocTypes, hooks, doc_events, Cust
 
 # ERPNext features in aimatic
 
-Put all owned behavior in `apps/aimatic`. Never edit `apps/frappe`,
-`apps/erpnext`, or `apps/hrms` directly. Before adding logic, inspect
-`aimatic/hooks.py`, existing controller methods, hooks, fixtures, and patches for
-the same doctype.
+Owned code lives in `apps/aimatic` only. Inspect `hooks.py`, existing handlers,
+fixtures, and patches for the same doctype before adding logic.
 
-## Lifecycle and authority
+## Gotchas
 
-- Choose the earliest necessary event, not the most familiar one. Core
-  controller `validate()` runs before app `validate` hooks; use
-  `before_validate` when owned defaults must exist before core validation.
-- Make server behavior authoritative. Client scripts may guide input but cannot
-  be the only validation, permission, pricing, stock, or accounting control.
-- Preserve all existing handlers and their ordering when multiple modules share
-  a doctype event.
-
-## Branch and accounting context
-
-Reuse `branch_management.events.apply_branch_defaults` and current helpers.
-Do not introduce generic warehouse or cost-center fallback. Set row-level
-warehouse, branch, and cost center where the transaction controller reads rows;
-parent defaults alone may not reach GL or stock entries. Keep deliberately
-excluded POS flows server-owned by their POS Profile contract.
-
-## Fixtures and patches
-
-- Track Custom Field, Property Setter, Client Script, Server Script, permission,
-  Workspace, and other configured records through the existing fixture/module
-  mechanism. Export only the affected fixture and review the resulting diff.
-- Place one-off patches in `aimatic/patches/` and register them once in
-  `patches.txt`: pre-model sync only when no new schema is required; otherwise
-  post-model sync.
-- Make patches idempotent and narrowly scoped. Fresh install may mark historical
-  patches complete without executing them, so put required baseline setup in the
-  install path as well as upgrade repair when necessary.
-
-## Verify narrowly
-
-Run syntax/static checks and validate changed JSON or embedded script first.
-Then test one normal path and the relevant denial, return, cancel, or retry path.
-Run `bench build --app aimatic` only for affected public assets. Any migrate,
-fixture export against a site, or deployment requires `bench-ops` and the
-appropriate operation gate.
+- Core `validate()` runs before app `validate` hooks. Use `before_validate` when
+  owned defaults must exist before core validation can reject the doc.
+- Client scripts guide input; server hooks own validation, permissions, pricing,
+  stock, and accounting.
+- Preserve handler order when multiple modules share a doctype event.
+- Reuse `branch_management.apply_branch_defaults`. No generic warehouse or
+  cost-center fallback. Set row-level warehouse/branch/cost_center — parent
+  defaults often do not reach GL/stock. POS Invoice stays POS-Profile-owned.
+- Fixtures use the exclude-list in `fixture_exclusions.json`. A second
+  `Custom DocPerm` fixture block needs its own `"prefix"` or it clobbers the
+  shared output file.
+- `Item Price.custom_barcodes` is owned by `aimatic.item_pricing.barcodes` —
+  keep field, hooks, fixture, and backfill patch in sync.
+- Patches are idempotent; register once in `patches.txt`. Fresh install may skip
+  historical patches, so baseline setup also belongs in the install path.

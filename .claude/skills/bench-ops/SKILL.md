@@ -5,34 +5,20 @@ description: Use for sites, backups, restore, migrate, build, restart, workers, 
 
 # Bench and site operations
 
-Read `../../reference/current-state.md`, then verify the exact site, role,
-configuration, branch/commit, processes, and intended impact read-only. Never
-infer production or test status from a site name.
+Read `../../reference/current-state.md`, then verify site role, config, and
+impact read-only. A site name is not proof of production vs test.
 
-## Live-operation gate
+## Live gate
 
-Read-only diagnosis is allowed. Before any live mutation, migration, restore,
-import, deployment, impactful restart, proxy change, scheduled job, data repair,
-or destructive test:
+Before any live mutation, migrate, restore, import, deploy, impactful restart,
+proxy change, or destructive test: explicit approval, verified current backup,
+expected checks, rollback path, then approved scope only.
 
-1. obtain explicit approval for the exact target and action;
-2. take the appropriate current backup and verify completion/recoverability;
-3. state expected effects and narrow post-action checks;
-4. prepare a concrete rollback path;
-5. execute only the approved scope and record results.
+## Gotchas
 
-Do not treat an old backup, a command preview, or another site's backup as
-sufficient.
-
-## Diagnose and verify
-
-Inspect common and site configuration without exposing secrets. For HTTPS-only
-authorization failures, verify the full forwarded-scheme/header chain before
-changing business logic. Distinguish code deployment, schema migration, asset
-build, cache clear, web-worker reload, queue-worker restart, and scheduler state;
-run only what the change requires.
-
-Afterward, verify process health and the specific business behavior, schema,
-asset, job, or route affected. Report commit, target, backup identifier, actions,
-checks, and rollback readiness. Update `current-state.md` only when a current
-operational fact was actually verified and changed.
+- Cashier login fine + supervisor auth broken usually means nginx overwrote
+  `X-Forwarded-Proto` with `$scheme` instead of `$http_x_forwarded_proto`.
+  `bench setup nginx` regenerates this; re-check after any site-add.
+- Distinguish code deploy, migrate, asset build, cache clear, web-worker
+  reload, queue-worker restart, and scheduler — run only what the change needs.
+- Update `current-state.md` only when a verified operational fact changed.

@@ -23,8 +23,8 @@ DATED_OR_NARRATIVE_HEADING = re.compile(
 )
 
 MAX_ROOT_WORDS = 600
-MAX_SKILL_BODY_WORDS = 600
-MAX_TOTAL_SKILL_BODY_WORDS = 7000
+MAX_SKILL_BODY_WORDS = 400
+MAX_TOTAL_SKILL_BODY_WORDS = 4500
 
 REQUIRED_REFERENCES = {
     "current-state.md",
@@ -257,8 +257,18 @@ def audit_config(config: Path, errors: list[str]) -> None:
     current_path = reference_root / "current-state.md"
     if current_path.is_file():
         current = current_path.read_text(encoding="utf-8")
-        if "not yet live" not in current or "Last human-confirmed:" not in current:
-            errors.append("current-state lacks dated SZL not-live designation")
+        if "Last human-confirmed:" not in current:
+            errors.append("current-state lacks Last human-confirmed date")
+        if "szl" not in current.lower():
+            errors.append("current-state lacks szl site entry")
+        szl_role_ok = any(
+            token in current.lower()
+            for token in ("not yet live", "production/live", "production/live site")
+        )
+        if not szl_role_ok:
+            errors.append(
+                "current-state lacks dated SZL role (not yet live or production/live)"
+            )
 
     actual_skills, total_body_words = audit_skills(config, errors)
     audit_routing(config, actual_skills, errors)

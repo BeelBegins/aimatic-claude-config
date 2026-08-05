@@ -1,22 +1,25 @@
 # Current operational state
 
-Last human-confirmed: 2026-07-31 (Asia/Karachi).
+Last human-confirmed: 2026-08-05 (Asia/Karachi).
+Verified backup before Foodpanda SFTP schedule-time field migrate on `szl`:
+`20260805_204347-szl` (db gunzip ok). Prior SFTP schema migrate backup:
+`20260805_201451-szl` (db gunzip ok). Prior POS API reload backup:
+`20260805_045249-szl` (db gunzip ok).
+Posapplication release `v3.0.14` published (refund step-up + related POS fixes).
 
 This file records current claims only. Verify read-only before any
 environment-sensitive action and update the date/evidence when facts change.
 
 ## Sites
 
-- `szl`: designated future production site; setup/data preparation was in
-  progress and it was not yet live when confirmed.
-- `siezal`: source site for the SZL catalog/setup work and historical live
-  operating data. User-confirmed 2026-07-31 as testing/development, not
-  production - still verify before high-impact changes since it responds
-  live on `aimatic.tech` and carries real historical data. Foodpanda schema
-  migration verified 2026-08-01 at aimatic commit `14999fa`, with pre-migration
-  backup prefix `20260801_001900-siezal`.
-- `hsm`: user-confirmed 2026-07-31 as testing/development. Responds live on
-  `hsm.aimatic.tech` - verify current data/role before high-impact changes.
+- `szl`: production/live site (user-confirmed 2026-08-04). Canonical target for
+  REST development and release verification — still verify before mutations.
+- `siezal`: testing/development (confirmed 2026-07-31). Serves `aimatic.tech`
+  with real historical data; verify before high-impact changes. Foodpanda schema
+  migration verified 2026-08-01 at aimatic `14999fa` (backup
+  `20260801_001900-siezal`).
+- `hsm`: testing/development (confirmed 2026-07-31). Serves `hsm.aimatic.tech`;
+  verify before high-impact changes.
 
 Site names do not grant permission or prove production status.
 

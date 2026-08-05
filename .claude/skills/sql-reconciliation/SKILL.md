@@ -5,37 +5,23 @@ description: Use for heavy SQL analytics, drill-through reports, vendor performa
 
 # SQL analytics and reconciliation
 
-Use current report code such as `aimatic/vendor_performance/api.py` as a shape,
-then verify schema and semantics in the installed version before writing SQL.
+Shape after current report code (e.g. `vendor_performance/api.py`); verify
+schema/semantics in the installed version before writing SQL.
 
-## Query design
+## Gotchas
 
-- Return cheap aggregate summaries first. Load per-item, per-voucher, or
-  per-transaction detail only on explicit drill-through and reset it when
-  filters change.
-- Bound date ranges, rows, groups, and expensive replay work. Before a FIFO or
-  all-ledger replay, count candidate rows and return a clear `too_large` result
-  above an evidence-based threshold.
-- Parameterize values and use Frappe permission/company/branch scope. Do not
-  expose unrestricted SQL or interpolate user input.
-- State the document statuses and voucher types included. COGS is cost-basis
-  value from the correct Stock Ledger valuation source, commonly negative
-  `stock_value_difference`, not sales revenue and not every Stock Entry.
-- Keep exceptional correction vouchers bounded and explicitly named in code;
-  never broaden a one-off rule to all vouchers of that type.
-
-## Scope correctly
-
-Header transactions may carry `branch`; Stock Ledger Entry and Bin carry
-`warehouse`. Expand branch filters for stock data through warehouses tagged to
-that branch. Define explicitly what zero matching warehouses means; never emit an
-invalid empty `IN` clause or silently claim complete zero activity. Surface older
-documents with missing branch values as a completeness caveat.
-
-## Reconcile independently
-
-Validate totals against a second path that does not reuse the implementation:
-a separately constructed aggregate, GL Entry, Stock Ledger Entry, or the source
-workbook. Reconcile currency to the smallest unit and explain differences by
-document/status/scope. Test one bounded summary and one drill-through; expand only
-when a mismatch points to a specific ledger or filter path.
+- Cheap aggregates first; per-item/voucher detail only on explicit drill-through.
+  Reset detail when filters change.
+- Bound expensive FIFO/ledger replay: count first, return `too_large` above an
+  evidence-based threshold.
+- Parameterize; use Frappe permission/company/branch scope. No unrestricted SQL.
+- COGS is SLE cost-basis (commonly `-stock_value_difference`), not sales revenue
+  and not every Stock Entry. Name exceptional correction vouchers explicitly.
+- Headers may carry `branch`; SLE/Bin carry `warehouse`. Expand branch → tagged
+  warehouses. Define zero-warehouse behavior; never emit empty `IN ()`.
+- Older docs may lack `branch` — surface as a completeness caveat.
+- Validate totals on an independent path (second aggregate, GL, SLE, or source
+  workbook).
+- Branch Price Sheet cost map: PR/PI supply explicit excl/incl custom fields;
+  Stock Entry `basic_rate` is tax-exclusive — reconstruct display-inclusive via
+  Item FBR tax rate. Never treat `valuation_rate` as proof of included GST.

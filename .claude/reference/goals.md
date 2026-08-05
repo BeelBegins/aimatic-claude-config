@@ -23,9 +23,10 @@ scripts and operational runbooks as executable project inputs.
 
 ## Efficient guidance
 
-Keep the root router and each skill under 600 words, total skill bodies under
-7,000 words, and routing coverage aligned exactly with the skill catalog.
-Prefer one primary skill, targeted verification, current code discovery, and no
-literal secrets or narrative archives.
+Keep the root router under 600 words, each skill under 400 words, and total
+skill bodies under 4,500 words. Skills are tip sheets of non-obvious gotchas —
+not process checklists or safety sermons (those live once in the root router).
+Prefer one primary skill, current code discovery, and no literal secrets or
+narrative archives.
 
 Review these goals after cutover or a major product or operational change.

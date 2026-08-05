@@ -5,23 +5,15 @@ description: Use for an aimatic Desk-home tile, Workspace, Workspace Sidebar ent
 
 # Desk navigation
 
-Treat `Workspace` and `Workspace Sidebar` as separate module documents.
+`Workspace` and `Workspace Sidebar` are separate module documents.
 
-- Use Workspace content for Desk-home shortcuts/cards.
-- Add the matching Workspace Sidebar section/link when the doctype must appear
-  in the left navigation. Never link child-table doctypes directly.
-- Leave `parent_page` empty for a top-level home tile. Set it to the owning
-  Workspace when the page should remain reachable through the parent without a
-  separate top-level tile.
-- Keep both doctypes in their native module-document paths and bump `modified`
-  timestamps for shipped edits. Do not add fixture or custom sync machinery.
-- Validate new icon names against current Frappe icon symbol IDs; invalid names
-  can fail silently.
+## Gotchas
 
-A Workspace slug wins before a Page route of the same slug. Search current and
-planned Workspace names before adding a Page; use a disambiguated route such as
-`-console` and point the Workspace shortcut to it.
-
-Verify the edited JSON, then migrate only an approved disposable/target site.
-Confirm the home tile, sidebar entry, route destination, roles, and icon once.
-Use `bench-ops` only when site migration/deployment is part of the request.
+- Workspace = Desk-home shortcuts/cards. Sidebar = left-nav links. Never link
+  child-table doctypes in the sidebar.
+- Empty `parent_page` = top-level home tile. Set it to fold under a parent
+  Workspace without a separate tile.
+- Native module-doc paths + bump `modified` on shipped edits. No fixture sync.
+- Invalid icon symbol IDs fail silently — validate against current Frappe icons.
+- A Workspace slug wins over a same-slug Page route. Disambiguate Pages with
+  `-console` and point the Workspace shortcut at that route.

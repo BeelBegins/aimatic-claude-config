@@ -5,34 +5,21 @@ description: "Use for Pakistan FBR POS e-invoicing: payload_builder, tax_calcula
 
 # FBR e-invoicing
 
-Start in `apps/aimatic/aimatic/fbr_pos/`: `payload_builder.py` snapshots invoice
-data, `tax_calculator.py` derives line tax, `accounting.py` aligns invoice tax
-rows and payments, and `api.py` submits using server-loaded settings.
+Start in `aimatic/fbr_pos/`: `payload_builder.py`, `tax_calculator.py`,
+`accounting.py`, `api.py`, settings via `settings.get_fbr_settings`.
 
-## Invariants
+## Gotchas
 
-- Keep FBR URLs and credentials in `FBR Integration Settings`, selected by the
-  current company and branch. Never log tokens, return them to a client, place
-  them in fixtures, or include them in test output.
-- Require a valid `Item.custom_fbr_tax_category` on every item-creation/import
-  path. Use the existing exempt-category precedent only where current code does.
-- Build payloads from server documents and snapshots, never from client-trusted
-  tax, identity, payment, or invoice values.
-- Clear copied `custom_fbr_*` snapshot state on returns so each return is
-  calculated and submitted independently. Preserve original-document references;
-  do not copy the sale's submission state forward.
-- Keep inclusive GST reconciliation inside Sales Taxes and Charges and re-run
-  ERPNext totals. Apply the POS fee only to sales, not returns. Align cash to the
-  resulting authoritative total only where current return rules allow it.
-- Treat voucher redemption as payment, not a discount, so item value reported to
-  FBR remains intact. Account for the active largest-payment-mode limitation in
-  `known-issues.md` when changing mixed payments.
-
-## Verification
-
-Use sandbox settings first. For one known document, compare the complete payload,
-item tax values, invoice tax rows, grand total, payments, and stored response with
-independently expected values. Include one return and one rejected/failed response
-when those paths change. Confirm accounting and payload agree; a successful HTTP
-response alone is insufficient. Production credentials or submission require the
-full live-operation gate.
+- Credentials stay in `FBR Integration Settings` (company+branch). Never log,
+  fixture, or return tokens.
+- Every Item needs `custom_fbr_tax_category` — blank hard-throws at POS submit.
+- Build from server snapshots, not client-trusted tax/identity/payment values.
+- Pakistan-localization Customer columns (`tax_strn`/`tax_ntn`/`tax_nic`) are
+  optional per site. Check columns exist before selecting; fall back to
+  `Customer.tax_id` for NTN.
+- Clear copied `custom_fbr_*` on returns so each return submits independently.
+- Inclusive GST lives in Sales Taxes and Charges; re-run totals. POS fee is
+  sales-only. Align cash to the new grand total only where return rules allow.
+- Voucher redemption is a payment row, not a discount (protects FBR item value).
+  Largest-row payment-mode selection can misreport when a voucher dominates —
+  see `known-issues.md`.

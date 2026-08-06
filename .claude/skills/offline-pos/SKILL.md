@@ -36,9 +36,16 @@ changing a contract.
   outstanding. ERPNext's `clear_unallocated_mode_of_payments` deletes amount=0
   rows on submit — `offline_pos.events.restore_food_panda_credit_payment_marker`
   must keep that marker for shift consolidation. Do not "fix" credit sales by
-  setting the marker amount to the grand total.
+  setting the marker amount to the grand total. The same zero marker applies to
+  Food Panda **refunds**; a non-zero MoP amount against the Receivable account
+  fails close with "Customer is required against Receivable account".
 - A Failed POS Closing leaves the Opening Entry Open. `_reject_if_failed_closing`
   blocks preview/sale/refund until Close Shift retries successfully. Do not
   allow selling into a stuck Failed close.
 - POS barcode lookup is case-insensitive (`s5` == `S5`). Scanner wedge capture
   must accept printable ASCII (including `()`), not only `[A-Za-z0-9\-_.]`.
+- Exact barcode/item-code scan only on Enter: never auto-pick a fuzzy search hit.
+  Failed scans must block with an in-app acknowledge dialog (Enter/OK) plus settle
+  lock so a second wedge scan cannot concatenate and resolve the wrong item.
+- Slash item search (`/…`) is gated by POS Profile `custom_allow_item_search`
+  (default on when the field is missing from a legacy bootstrap cache).
